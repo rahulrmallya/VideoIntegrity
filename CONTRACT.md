@@ -1,4 +1,4 @@
-# FrameSeal — Interface Contract v1.0
+# FrameSeal — Interface Contract v1.2
 
 Single source of truth shared by the backend agent (Codex, `/backend`) and the frontend agent (Claude Code, `/frontend`).
 Neither agent edits this file. If a change is needed, the agent stops and describes it; the human applies it and logs it in §12.
@@ -286,3 +286,5 @@ backend/data/exports/*.zip
 | Version | Change | Approved by |
 | --- | --- | --- |
 | 1.0 | Initial contract | human |
+| 1.1 | Clarifications: (a) WebSocket message fields sit at the top level next to `type`, no `payload` wrapper, e.g. `{"type":"stats","stats":{...}}`, `{"type":"frame","seq":1,...}`. (b) Nullable: `Incident.closed_at`, `attack_id`, `attack_type`, `detection_latency_ms`, all `evidence.*` fields, `seal.signature`. `Incident.status` is `"open"` or `"closed"`. (c) `ts_ns` is display-only on the frontend (JS loses precision above 2^53); frames are identified by `seq`. (d) The CLI verifier lives at `backend/tools/verify_package.py`. | human |
+| 1.2 | Edge cases: (a) §5.3 — if the payload hash differs AND the JPEG cannot be decoded, it is still FRAME_MODIFIED with `evidence.visual_change_pct = null`. (b) §5.8 — the watchdog is armed only after the first packet has reached the verifier; it never fires before that. When it fires, `seq_from = seq_to = expected_seq` (the first frame that did not arrive) and `evidence.sample_seq = expected_seq - 1` (the last frame received). | human |
