@@ -1,14 +1,62 @@
 """Session ledger and frame storage."""
 
+import logging
 from collections import deque
 from dataclasses import dataclass
+from heapq import nlargest
+from os import stat_result
 from pathlib import Path
+from shutil import rmtree
+from stat import FILE_ATTRIBUTE_REPARSE_POINT, S_ISDIR
 from typing import Literal
+from uuid import UUID
 
+from app.config import SESSION_MAX_FRAMES
 from app.models import ChainRecord, Seal, Session, StartRequest
 from app.producer import Packet
 
 FrameCopy = Literal["original", "received"]
+SESSION_RETENTION = 10
+logger = logging.getLogger(__name__)
+
+
+def _session_folder(root: Path, folder: Path) -> stat_result | None:
+    """Recognize an ordinary UUID4 session directory inside the session root."""
+    try:
+        identity = UUID(folder.name)
+        if identity.version != 4 or str(identity) != folder.name:
+            return None
+        info = folder.lstat()
+        if (S_ISDIR(info.st_mode)
+                and not getattr(info, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT
+                and folder.resolve() == root / folder.name):
+            return info
+    except (ValueError, OSError):
+        return None
+    return None
+
+
+def prune_sessions(sessions_dir: Path) -> None:
+    """Keep the ten newest session folders without following directory links."""
+    try:
+        info = sessions_dir.lstat()
+    except FileNotFoundError:
+        return
+    if not S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+        return
+    root = sessions_dir.resolve()
+    candidates = (
+        (info.st_mtime_ns, folder.name) for folder in root.iterdir()
+        if (info := _session_folder(root, folder)) is not None
+    )
+    keep = {name for _, name in nlargest(SESSION_RETENTION, candidates)}
+    for folder in root.iterdir():
+        if folder.name not in keep and _session_folder(root, folder) is not None:
+            try:
+                rmtree(folder)
+                logger.info("Removed old session %s", folder.name)
+            except OSError:
+                logger.warning("Could not remove old session %s", folder.name, exc_info=True)
 
 
 @dataclass(frozen=True)
@@ -89,5 +137,6 @@ class Vault:
         if limit == 0:
             return []
         with self._ledger_path.open("rb") as ledger:
-            lines = deque((line for line in ledger if line.endswith(b"\n")), maxlen=limit)
+            lines = deque((line for line in ledger if line.endswith(b"\n")),
+                          maxlen=min(limit, SESSION_MAX_FRAMES))
         return [ChainRecord.model_validate_json(line) for line in reversed(lines)]

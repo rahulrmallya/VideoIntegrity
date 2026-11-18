@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from base64 import b64encode
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, deque
 from dataclasses import asdict, dataclass, field
 from itertools import count
 from pathlib import Path
@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from app import crypto
 from app.broadcaster import Broadcaster, Message
 from app.channel import AttackConflict, Channel
-from app.config import utc_timestamp
+from app.config import SESSION_MAX_FRAMES, SESSION_MAX_SECONDS, utc_timestamp
 from app.models import (
     AttackAck, AttackRequest, ChainRecord, Device, Incident, Seal, Session, StartRequest, Stats,
 )
@@ -78,7 +78,7 @@ class _Run:
     settings: StartRequest
     started: float
     metrics: _Metrics
-    incident_events: list[Incident]
+    incident_events: deque[Incident]
     stopped: float | None = None
     pending: dict[int, bytes] = field(default_factory=dict)
 
@@ -270,7 +270,7 @@ class Pipeline:
 
     def _publish(self, message: Message) -> None:
         """Schedule a notification without waiting for the loop or its clients."""
-        self._loop.call_soon_threadsafe(self._broadcaster.publish, message)
+        self._broadcaster.submit(self._loop, message)
 
     def _publish_incidents(self, run: _Run) -> None:
         """Emit incident snapshots in the order they were recorded."""
@@ -305,7 +305,7 @@ class Pipeline:
             session_id = session.session_id
             assert session_id is not None
             started = time.monotonic()
-            incidents: list[Incident] = []
+            incidents: deque[Incident] = deque(maxlen=16)
             channel = Channel(jpeg_quality=request.jpeg_quality, attack_ids=self._attack_ids)
             verifier = Verifier(session_id, self._pk_raw, request.checkpoint_interval, request.fps,
                                 on_incident=incidents.append)
@@ -322,19 +322,29 @@ class Pipeline:
             )
             period = 1 / request.fps
             deadline = started
+            expires_at = started + SESSION_MAX_SECONDS
             encode_options = [cv2.IMWRITE_JPEG_QUALITY, request.jpeg_quality]
             while not self._stop_signal.is_set():
+                now = time.monotonic()
+                if now >= expires_at or run.metrics.frames_produced >= SESSION_MAX_FRAMES:
+                    logger.info("Auto-stopping session %s at the capture limit", session_id)
+                    break
+                if now < deadline:
+                    self._stop_signal.wait(min(deadline, expires_at) - now)
+                    continue
                 try:
                     image = source.read()
-                except cv2.error:
+                except (cv2.error, OSError):
                     image = None
                 if image is None:
                     self._tick(run)
-                    fallback = "file" if source.kind == "webcam" else "synthetic"
-                    logger.warning("%s stopped delivering frames. Trying %s.", source.label, fallback)
-                    source.close()
+                    logger.warning("%s stopped delivering frames. Switching to synthetic.", source.label)
+                    try:
+                        source.close()
+                    except (cv2.error, OSError):
+                        logger.exception("Could not release the disconnected source")
                     source, label = open_source(request.model_copy(update={
-                        "source": fallback, "file_path": None,
+                        "source": "synthetic", "file_path": None,
                     }))
                     session = session.model_copy(update={"source": source.kind, "source_label": label})
                     run.vault.save_session(session)
@@ -357,7 +367,6 @@ class Pipeline:
                 deadline += period
                 if deadline < now:
                     deadline += (int((now - deadline) / period) + 1) * period
-                self._stop_signal.wait(max(0.0, deadline - now))
         except Exception as error:
             logger.exception("Capture failed")
             if not startup.ready.is_set():
@@ -366,7 +375,7 @@ class Pipeline:
             try:
                 if source is not None:
                     source.close()
-            except cv2.error:
+            except (cv2.error, OSError):
                 logger.exception("Could not release the capture source")
             try:
                 if run is not None and run is self._run:
@@ -391,7 +400,7 @@ class Pipeline:
                 metrics.sign_ms += run.producer.sign_ms
             for incoming in delivered:
                 result = run.verifier.process(incoming)
-                limit = max(SEEN_LIMIT, self._session.checkpoint_interval)
+                limit = min(SESSION_MAX_FRAMES, max(SEEN_LIMIT, self._session.checkpoint_interval))
                 metrics.apply(result, limit)
                 self._publish_frame(run, incoming, result, packet)
             if not delivered:

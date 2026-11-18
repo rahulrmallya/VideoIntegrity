@@ -38,7 +38,14 @@ export type VerifierHooks = {
   onTampered(seq: number): void
 }
 
-type OpenIncident = { inc: Incident; affected: Set<number>; missing: Set<number> }
+type OpenIncident = {
+  inc: Incident
+  affected: Set<number>
+  missing: Set<number>
+  /** min/max seq per failure kind (REPLAY explanation needs the replayed range). */
+  ranges: Map<IncidentKind, [number, number]>
+  silenceS?: number
+}
 
 type Failure = {
   kind: IncidentKind
@@ -48,43 +55,49 @@ type Failure = {
   range?: [number, number]
   proof: string
   evidence: Partial<IncidentEvidence> & { sample_seq: number }
+  /** STREAM_INTERRUPTED: seconds of silence when the watchdog fired. */
+  silenceS?: number
 }
 
-const TEXT: Record<IncidentKind, { title: string; explanation: string }> = {
-  FRAME_MODIFIED: {
-    title: 'Frame content altered',
-    explanation:
-      "The picture no longer matches the fingerprint the camera recorded when it captured it — someone edited these frames on the way.",
-  },
-  FRAME_DELETED: {
-    title: 'Frames deleted',
-    explanation: 'Frames the camera recorded never arrived. The sequence numbers jump, so footage was removed.',
-  },
-  FRAME_INSERTED: {
-    title: 'Fake frame inserted',
-    explanation: 'Two different frames claim the same position in the recording — one of them was injected by an attacker.',
-  },
-  FRAME_REORDERED: {
-    title: 'Frames reordered',
-    explanation: 'A frame arrived after the frame that follows it — the order of events was changed.',
-  },
-  REPLAY_DETECTED: {
-    title: 'Old footage replayed',
-    explanation: 'Frames that were already received are being sent again — the classic "loop the CCTV" trick.',
-  },
-  CHAIN_FORGED: {
-    title: 'Forged chain — signature invalid',
-    explanation:
-      "Every frame looked self-consistent, but the camera's Ed25519 signature does not match them. Only the camera's private key can produce a valid seal.",
-  },
-  CHAIN_BROKEN: {
-    title: 'Hash chain broken',
-    explanation: 'A frame does not link to the frame before it, so the recording is no longer one unbroken sequence.',
-  },
-  STREAM_INTERRUPTED: {
-    title: 'Stream interrupted',
-    explanation: 'No frames reached the verifier for over 2 seconds — the feed was cut or blocked.',
-  },
+/** Titles and explanations exactly as the real backend words them, so mock and live look the same. */
+const TITLE: Record<IncidentKind, string> = {
+  FRAME_MODIFIED: 'Frame content altered',
+  FRAME_DELETED: 'Frames deleted',
+  FRAME_INSERTED: 'Fake frame inserted',
+  FRAME_REORDERED: 'Frames shuffled',
+  REPLAY_DETECTED: 'Old footage replayed',
+  CHAIN_FORGED: 'Forgery caught by signature',
+  CHAIN_BROKEN: 'Chain broken',
+  STREAM_INTERRUPTED: 'Live feed cut',
+}
+
+function explain(o: OpenIncident): string {
+  const inc = o.inc
+  const n = inc.evidence.sample_seq
+  switch (inc.kind) {
+    case 'FRAME_MODIFIED':
+      return `The pixels of frame #${n} don't match the fingerprint the camera recorded. Someone edited this frame after it was captured.`
+    case 'FRAME_DELETED': {
+      const miss = [...o.missing]
+      const a = miss.length ? Math.min(...miss) : inc.seq_from
+      const b = miss.length ? Math.max(...miss) : inc.seq_to
+      return `${miss.length} frame${miss.length === 1 ? '' : 's'} (#${a}–#${b}) never arrived. The chain jumps over them, so the missing footage is provable.`
+    }
+    case 'FRAME_INSERTED':
+      return `Two different frames claimed to be #${n}. Only one belongs to the camera's signed chain.`
+    case 'FRAME_REORDERED':
+      return `Frame #${n} arrived after a later frame. The chain order proves it was moved.`
+    case 'REPLAY_DETECTED': {
+      const [a, b] = o.ranges.get('REPLAY_DETECTED') ?? [n, n]
+      return `The stream is showing frames #${a}–#${b} a second time. Someone is looping recorded footage instead of live video.`
+    }
+    case 'CHAIN_FORGED':
+      return "Every frame hash looked valid, but the camera's signature over the chain does not match. Someone edited frames and recomputed the hashes — they cannot forge the camera's private-key signature."
+    case 'CHAIN_BROKEN':
+      return `Frame #${n} does not link to the previous frame's hash.`
+    case 'STREAM_INTERRUPTED':
+      return `No signed frames reached the viewer for ${(o.silenceS ?? 2).toFixed(3)} s.`
+  }
 }
 
 const short = (h: string | null | undefined) => (h ? `${h.slice(0, 4)}…${h.slice(-4)}` : '—')
@@ -145,11 +158,13 @@ export class MockVerifier {
     if (this.delivered === 0 || this.silenceReported || now - this.lastDelivery <= this.watchdogMs) return
     this.silenceReported = true
     const last = this.expectedSeq - 1
+    const silenceS = (now - this.lastDelivery) / 1000
     this.fail({
       kind: 'STREAM_INTERRUPTED',
       seqs: [],
       range: [this.expectedSeq, this.expectedSeq],
-      proof: `No packet for ${((now - this.lastDelivery) / 1000).toFixed(1)} s after frame #${last}  (limit ${(this.watchdogMs / 1000).toFixed(1)} s)`,
+      silenceS,
+      proof: `No delivery for ${silenceS.toFixed(3)} s; last chain hash ${short(this.anchor)}`,
       evidence: { sample_seq: last },
     })
   }
@@ -186,7 +201,7 @@ export class MockVerifier {
         this.fail({
           kind: 'REPLAY_DETECTED',
           seqs: [h.seq],
-          proof: `Frame #${h.seq} (chain ${short(h.chain_hash)}) was already received — expected #${this.expectedSeq}`,
+          proof: `Frame #${h.seq} repeats chain hash ${short(h.chain_hash)}`,
           evidence: { sample_seq: h.seq, expected_hash: known, actual_hash: h.chain_hash },
         })
       } else if (known !== undefined) {
@@ -195,28 +210,27 @@ export class MockVerifier {
         this.fail({
           kind: 'FRAME_INSERTED',
           seqs: [h.seq],
-          proof: `Two different frames claim #${h.seq}: chain ${short(known)}  ≠  ${short(h.chain_hash)}`,
+          proof: `Frame #${h.seq} chain hash ${short(h.chain_hash)} ≠ first seen ${short(known)}`,
           evidence: { sample_seq: h.seq, expected_hash: h.chain_hash, actual_hash: known },
         })
       } else {
         reasons.push('FRAME_REORDERED')
         this.setStatus(h.seq, 'tampered')
-        const proof = `Frame #${h.seq} arrived after #${this.expectedSeq - 1}`
-        this.fail({
-          kind: 'FRAME_REORDERED',
-          seqs: [h.seq],
-          proof,
-          evidence: { sample_seq: h.seq, expected_hash: h.frame_hash, actual_hash: computed },
-        })
+        const proof = `Frame #${h.seq} (${short(h.chain_hash)}) arrived after #${this.expectedSeq - 1}`
+        const evidence = { sample_seq: h.seq, expected_hash: null, actual_hash: h.chain_hash }
+        this.fail({ kind: 'FRAME_REORDERED', seqs: [h.seq], proof, evidence })
         if (this.open && this.open.inc.kind === 'FRAME_DELETED') {
-          const inc = this.open.inc
+          // §5.1: re-classify; the late frame is no longer missing
+          const o = this.open
+          const inc = o.inc
           inc.kind = 'FRAME_REORDERED'
-          inc.title = TEXT.FRAME_REORDERED.title
-          inc.explanation = TEXT.FRAME_REORDERED.explanation
+          inc.title = TITLE.FRAME_REORDERED
           inc.proof = proof
-          this.open.missing.delete(h.seq)
-          inc.missing_count = this.open.missing.size
-          this.hooks.upsertIncident({ ...inc })
+          inc.evidence = { ...inc.evidence, ...evidence, expected_prev: null, actual_prev: null, visual_change_pct: null }
+          o.missing.delete(h.seq)
+          this.refreshCounts(o)
+          inc.explanation = explain(o)
+          this.hooks.upsertIncident({ ...inc, kinds_seen: [...inc.kinds_seen], evidence: { ...inc.evidence } })
         }
       }
       this.emitFrame(pkt, computed, verdict, reasons, hashMs, t0)
@@ -238,8 +252,8 @@ export class MockVerifier {
         kind: 'FRAME_DELETED',
         seqs: missing,
         missing,
-        proof: `Expected frame #${this.expectedSeq}, received #${h.seq} — ${missing.length} frame${missing.length === 1 ? '' : 's'} never arrived`,
-        evidence: { sample_seq: this.expectedSeq, expected_prev: this.anchor, actual_prev: h.prev_hash },
+        proof: `Expected frame #${this.expectedSeq}; missing through #${h.seq - 1}; prior hash ${short(this.anchor)}`,
+        evidence: { sample_seq: this.expectedSeq },
       })
     }
 
@@ -252,7 +266,7 @@ export class MockVerifier {
       this.fail({
         kind: 'FRAME_MODIFIED',
         seqs: [h.seq],
-        proof: `SHA-256(received frame) = ${short(computed)}  ≠  camera's recorded hash ${short(h.frame_hash)}`,
+        proof: `SHA-256(received) ${short(computed)} ≠ recorded ${short(h.frame_hash)}`,
         evidence: { sample_seq: h.seq, expected_hash: h.frame_hash, actual_hash: computed, visual_change_pct: pct },
       })
     }
@@ -314,7 +328,7 @@ export class MockVerifier {
           kind: 'CHAIN_FORGED',
           seqs: [...this.window],
           proof: h.signature
-            ? `Ed25519 signature on checkpoint #${h.seq} does not verify for chain hash ${short(h.chain_hash)}`
+            ? `Ed25519 signature failed for chain hash ${short(h.chain_hash)}`
             : `Checkpoint #${h.seq} carries no signature`,
           evidence: { sample_seq: h.seq, expected_hash: null, actual_hash: h.chain_hash },
         })
@@ -392,7 +406,9 @@ export class MockVerifier {
       if (!inc.kinds_seen.includes(f.kind)) inc.kinds_seen.push(f.kind)
       for (const s of f.seqs) o.affected.add(s)
       for (const s of f.missing ?? []) o.missing.add(s)
+      this.trackRange(o, f)
       this.refreshCounts(o)
+      inc.explanation = explain(o)
       this.hooks.upsertIncident({ ...inc, kinds_seen: [...inc.kinds_seen], evidence: { ...inc.evidence } })
       return
     }
@@ -406,8 +422,8 @@ export class MockVerifier {
       kinds_seen: [f.kind],
       severity: f.kind === 'STREAM_INTERRUPTED' ? 'warning' : 'critical',
       status: 'open',
-      title: TEXT[f.kind].title,
-      explanation: TEXT[f.kind].explanation,
+      title: TITLE[f.kind],
+      explanation: '',
       proof: f.proof,
       seq_from: f.range?.[0] ?? f.evidence.sample_seq,
       seq_to: f.range?.[1] ?? f.evidence.sample_seq,
@@ -428,10 +444,24 @@ export class MockVerifier {
       },
       acknowledged: false,
     }
-    const opened: OpenIncident = { inc, affected: new Set(f.seqs), missing: new Set(f.missing ?? []) }
+    const opened: OpenIncident = {
+      inc,
+      affected: new Set(f.seqs),
+      missing: new Set(f.missing ?? []),
+      ranges: new Map(),
+      silenceS: f.silenceS,
+    }
     this.open = opened
+    this.trackRange(opened, f)
     this.refreshCounts(opened)
+    inc.explanation = explain(opened)
     this.hooks.upsertIncident({ ...inc, kinds_seen: [...inc.kinds_seen], evidence: { ...inc.evidence } })
+  }
+
+  private trackRange(o: OpenIncident, f: Failure) {
+    if (f.seqs.length === 0) return
+    const [lo, hi] = o.ranges.get(f.kind) ?? [Infinity, -Infinity]
+    o.ranges.set(f.kind, [Math.min(lo, ...f.seqs), Math.max(hi, ...f.seqs)])
   }
 
   private refreshCounts(o: OpenIncident) {

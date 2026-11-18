@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { ApiRequestError } from '../api/client'
 import { api, IS_MOCK, live } from '../api/backend'
 import type { AttackType, LiveMessageType, TamperSampleMode } from '../api/types'
+import { fmtLatency } from '../lib/incidents'
 import { useActiveAttack, useConnection, useIncidents, useSession } from '../store/useLive'
 
 const TYPES: LiveMessageType[] = ['frame', 'status', 'seal', 'stats', 'incident', 'attack', 'session', 'hello']
@@ -143,7 +144,7 @@ export function DebugOverlay() {
           <li key={i.id} className="flex gap-2">
             <span>{i.id.replace('inc_', '#')}</span>
             <span className={i.status === 'open' ? 'text-tampered' : 'text-text'}>{i.kind}</span>
-            <span className="ml-auto">{i.detection_latency_ms !== null ? `${i.detection_latency_ms}ms` : '—'}</span>
+            <span className="ml-auto">{i.detection_latency_ms !== null ? fmtLatency(i.detection_latency_ms) : '—'}</span>
             <span className={i.status === 'open' ? 'text-tampered' : 'text-sealed'}>{i.status}</span>
           </li>
         ))}

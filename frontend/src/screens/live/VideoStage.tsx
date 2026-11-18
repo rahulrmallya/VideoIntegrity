@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { originalUrl } from '../../api/backend'
 import type { Incident } from '../../api/types'
 import { clockFromNs, shortHash } from '../../lib/format'
+import { fmtLatency } from '../../lib/incidents'
 import { useFrame, useLatestSeal, useLive, useOpenIncident, useSeqStatus, useSession } from '../../store/useLive'
 import { useUi } from '../../store/useUi'
 
@@ -196,7 +197,7 @@ function TamperBanner({ incident, onOpen }: { incident: Incident; onOpen: () => 
         </div>
         <div className="truncate font-mono text-[11px] opacity-85">
           {incident.kind}
-          {incident.detection_latency_ms !== null && ` · caught in ${incident.detection_latency_ms} ms`}
+          {incident.detection_latency_ms !== null && ` · caught in ${fmtLatency(incident.detection_latency_ms)}`}
           {` · ${incident.affected_count} frame${incident.affected_count === 1 ? '' : 's'} affected`}
         </div>
       </div>

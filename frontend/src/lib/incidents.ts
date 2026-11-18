@@ -60,11 +60,17 @@ export const ATTACK_ORDER: AttackType[] = [
   'STREAM_CUT',
 ]
 
+/** The real backend runs channel and verifier in one process, so per-frame detection is often < 1 ms. */
+export function fmtLatency(ms: number): string {
+  if (ms < 1) return '< 1 ms'
+  return ms < 10 ? `${ms.toFixed(1)} ms` : `${Math.round(ms)} ms`
+}
+
 export function detectedText(inc: Incident, watchdogS = 2): string {
   if (inc.kind === 'CHAIN_FORGED') return 'Detected at the next signature'
   if (inc.kind === 'STREAM_INTERRUPTED') return `Detected after ${watchdogS.toFixed(1)} s of silence`
   if (inc.detection_latency_ms === null) return 'Detected live'
-  return `Detected in ${inc.detection_latency_ms} ms`
+  return `Detected in ${fmtLatency(inc.detection_latency_ms)}`
 }
 
 export function seqRange(inc: Incident): string {

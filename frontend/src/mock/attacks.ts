@@ -8,7 +8,7 @@ export const CATALOG: AttackInfo[] = [
   {
     type: 'PIXEL_TAMPER',
     label: 'Erase an object',
-    description: 'Blurs the central 40% × 40% of the next 30 frames and re-encodes them, leaving the headers untouched.',
+    description: 'Blurs the central region of the next 30 frames.',
     expected_kind: 'FRAME_MODIFIED',
   },
   {
@@ -20,32 +20,31 @@ export const CATALOG: AttackInfo[] = [
   {
     type: 'FRAME_INSERT',
     label: 'Insert a fake frame',
-    description: 'Sends a foreign synthetic frame claiming the next seq, with a self-consistent header linked to the last forwarded chain hash.',
+    description: 'Sends a synthetic frame claiming the next genuine sequence.',
     expected_kind: 'FRAME_INSERTED',
   },
   {
     type: 'FRAME_REORDER',
     label: 'Swap two frames',
-    description: 'Holds packet k, sends k+1, then k.',
+    description: 'Delivers the next two packets out of order.',
     expected_kind: 'FRAME_REORDERED',
   },
   {
     type: 'LOOP_REPLAY',
     label: 'Loop old footage',
-    description: 'Drops the next 45 live packets and sends the last 45 forwarded packets again instead — the classic heist "loop the CCTV".',
+    description: 'Replays the last 45 forwarded packets instead of live footage.',
     expected_kind: 'REPLAY_DETECTED',
   },
   {
     type: 'CHAIN_FORGE',
     label: 'Smart forgery',
-    description:
-      'Draws a black box on frames and recomputes frame_hash, dhash, prev_hash and chain_hash so every per-frame check passes; keeps the original signature because it has no private key.',
+    description: 'Alters frames and recomputes hashes while retaining the original signature.',
     expected_kind: 'CHAIN_FORGED',
   },
   {
     type: 'STREAM_CUT',
     label: 'Cut the feed',
-    description: 'Drops all packets for 4 seconds.',
+    description: 'Drops all packets for four seconds.',
     expected_kind: 'STREAM_INTERRUPTED',
   },
 ]

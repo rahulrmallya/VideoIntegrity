@@ -1,8 +1,9 @@
 """FastAPI entry point for FrameSeal."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated
 
@@ -12,11 +13,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StaticHTTPException
 
 from app import crypto
-from app.broadcaster import Broadcaster
+from app.broadcaster import Broadcaster, ClientLimitReached
 from app.channel import CATALOG, AttackConflict
-from app.config import DATA_DIR, utc_timestamp
+from app.config import DATA_DIR, FRONTEND_DIST, utc_timestamp
 from app.evidence import EvidenceConflict, EvidenceStore, diff_png
 from app.models import (
     AttackAck, AttackInfo, AttackRequest, ChainRecord, Device, ExportResult, Incident, Session,
@@ -24,16 +26,35 @@ from app.models import (
 )
 from app.package_verifier import InvalidPackage
 from app.pipeline import Pipeline
-from app.vault import FrameCopy
+from app.vault import FrameCopy, prune_sessions
 
 OPENAPI_URL = "/openapi.json"
 DOCS_ASSETS_URL = "/docs/assets"
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+async def log_capture_metrics(pipeline: Pipeline, broadcaster: Broadcaster) -> None:
+    """Log capture timings and WebSocket queue sizes every ten seconds."""
+    while True:
+        await asyncio.sleep(10)
+        stats = await asyncio.to_thread(pipeline.stats)
+        if stats.integrity != "IDLE":
+            pending, clients = broadcaster.queue_sizes()
+            logger.info(
+                "fps_actual=%.2f avg_hash_ms=%.3f avg_sign_ms=%.3f avg_verify_ms=%.3f "
+                "handoff_queue=%d client_queues=%s",
+                stats.fps_actual, stats.avg_hash_ms, stats.avg_sign_ms, stats.avg_verify_ms,
+                pending, clients,
+            )
+
 
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     """Load the device identity and release any active capture on shutdown."""
+    logging.basicConfig(level=logging.INFO)
     data_dir: Path = application.state.data_dir
+    await asyncio.to_thread(prune_sessions, data_dir / "sessions")
     key_path = data_dir / "keys" / "device_ed25519.pem"
     sk, pk_raw = crypto.load_or_create_device_key(key_path)
     device = Device(
@@ -47,13 +68,16 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     application.state.broadcaster = broadcaster
     application.state.pipeline = pipeline
     application.state.evidence = EvidenceStore(data_dir / "exports")
+    telemetry = asyncio.create_task(log_capture_metrics(pipeline, broadcaster))
     try:
         yield
     finally:
+        telemetry.cancel()
+        await asyncio.gather(telemetry, return_exceptions=True)
         await asyncio.to_thread(pipeline.stop)
 
 
-def create_app(data_dir: Path = DATA_DIR) -> FastAPI:
+def create_app(data_dir: Path = DATA_DIR, *, frontend_dir: Path | None = None) -> FastAPI:
     """Create the backend with a configurable local data directory."""
     application = FastAPI(
         title="FrameSeal",
@@ -77,7 +101,34 @@ def create_app(data_dir: Path = DATA_DIR) -> FastAPI:
     )
     application.add_exception_handler(RequestValidationError, validation_error)
     application.include_router(router)
+    if frontend_dir is not None:
+        _serve_frontend(application, frontend_dir)
     return application
+
+
+def _serve_frontend(application: FastAPI, directory: Path) -> None:
+    """Add static serving and SPA routes after the REST and WebSocket routes."""
+    if not (directory / "index.html").is_file():
+        raise RuntimeError(f"Frontend build missing at {directory}. Run npm run build in frontend.")
+    static = StaticFiles(directory=directory, html=True)
+
+    @application.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+    async def frontend(path: str, request: Request) -> Response:
+        """Serve built files and fall back to index.html for client-side routes."""
+        prefix = path.split("/", 1)[0]
+        if prefix in {"api", "ws", "docs", "openapi.json"}:
+            raise HTTPException(404, "Not Found")
+        try:
+            return await static.get_response(path or ".", request.scope)
+        except StaticHTTPException as error:
+            if error.status_code != 404 or prefix == "assets" or Path(path).suffix:
+                raise
+            return await static.get_response("index.html", request.scope)
+
+
+def create_demo_app() -> FastAPI:
+    """Create the one-port demo with the compiled frontend."""
+    return create_app(frontend_dir=FRONTEND_DIST)
 
 
 async def validation_error(request: Request, error: RequestValidationError) -> JSONResponse:
@@ -274,12 +325,16 @@ async def _wait_for_disconnect(websocket: WebSocket) -> None:
 @router.websocket("/ws/live")
 async def live(websocket: WebSocket) -> None:
     """Send the current state, then stream live messages to this client."""
-    await websocket.accept()
     broadcaster: Broadcaster = websocket.app.state.broadcaster
     pipeline: Pipeline = websocket.app.state.pipeline
-    queue = broadcaster.register()
+    try:
+        queue = broadcaster.register()
+    except ClientLimitReached:
+        await websocket.close(code=1013)
+        return
     tasks: list[asyncio.Task[None]] = []
     try:
+        await websocket.accept()
         await websocket.send_json({
             "type": "hello",
             "session": pipeline.session().model_dump(mode="json"),
@@ -293,14 +348,15 @@ async def live(websocket: WebSocket) -> None:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             task.result()
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     finally:
         broadcaster.unregister(queue)
         for task in tasks:
             task.cancel()
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            with suppress(asyncio.CancelledError):
+                await asyncio.gather(*tasks, return_exceptions=True)
 
 
 app = create_app()

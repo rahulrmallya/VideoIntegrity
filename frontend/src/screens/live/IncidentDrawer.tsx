@@ -5,7 +5,7 @@ import { api, diffUrl, originalUrl, receivedUrl } from '../../api/backend'
 import { ApiRequestError } from '../../api/client'
 import type { Incident, IncidentKind, TimelineStatus } from '../../api/types'
 import { toast } from '../../components/ui/Toasts'
-import { detectedText, KIND_ICON, seqRange } from '../../lib/incidents'
+import { detectedText, fmtLatency, KIND_ICON, seqRange } from '../../lib/incidents'
 import { useCatalog, useCheckpoints, useIncident, useSession, useTimeline } from '../../store/useLive'
 import { useUi } from '../../store/useUi'
 
@@ -52,7 +52,7 @@ function hashPairs(inc: Incident): Pair[] {
       FRAME_INSERTED: [`Two frames claim #${ev.sample_seq}`, 'genuine frame', 'first received'],
       REPLAY_DETECTED: ['Chain hash', 'already received', 'received again'],
       CHAIN_FORGED: ['Checkpoint chain hash', 'camera signed', 'forged chain'],
-      FRAME_REORDERED: ['Frame fingerprint · SHA-256', "camera's record", 'late arrival'],
+      FRAME_REORDERED: ['Chain hash of the late frame', 'in order', 'arrived late'],
     }
     const [title, e, a] = labels[inc.kind] ?? ['Hash', 'expected', 'received']
     let note: string | undefined
@@ -215,7 +215,13 @@ function MiniChain({ inc }: { inc: Incident }) {
         ]
       : seqs.map((seq) => ({ type: 'seq' as const, seq }))
 
-  const statusOf = (seq: number): TimelineStatus | 'unknown' => timeline.get(seq) ?? 'unknown'
+  // The live timeline only covers the last 900 seqs of this page load (e.g. not after a reload):
+  // fall back to what the incident itself says about its range.
+  const inferred = (seq: number): TimelineStatus | 'unknown' => {
+    if (seq < inc.seq_from || seq > inc.seq_to || inc.kind === 'REPLAY_DETECTED') return 'unknown'
+    return inc.kind === 'FRAME_DELETED' || inc.kind === 'STREAM_INTERRUPTED' ? 'missing' : 'tampered'
+  }
+  const statusOf = (seq: number): TimelineStatus | 'unknown' => timeline.get(seq) ?? inferred(seq)
   const bad = (n: ChainNode | undefined) =>
     n?.type === 'gap' ? false : n ? ['tampered', 'missing'].includes(statusOf(n.seq)) || checkpoints.get(n.seq) === false : false
   const invalidCkpt = seqs.find((s) => checkpoints.get(s) === false) ?? null
@@ -379,7 +385,7 @@ function DrawerBody({ inc, onClose }: { inc: Incident; onClose: () => void }) {
             <Timer className="size-3.5 text-unverified" />
             {detectedText(inc, watchdogS)}
             {inc.detection_latency_ms !== null && (inc.kind === 'CHAIN_FORGED' || inc.kind === 'STREAM_INTERRUPTED') && (
-              <span className="font-mono text-muted">· {inc.detection_latency_ms} ms</span>
+              <span className="font-mono text-muted">· {fmtLatency(inc.detection_latency_ms)}</span>
             )}
           </div>
           <div className="flex items-center gap-1.5 truncate text-muted">

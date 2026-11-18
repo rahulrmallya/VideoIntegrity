@@ -34,10 +34,17 @@ export function MetricTiles() {
       </Tile>
       <Tile icon={<Timer className="size-3.5 text-unverified" />} label="Detection latency" sub="last attack → alarm">
         {s?.last_detection_latency_ms != null ? (
-          <>
-            <AnimatedNumber value={s.last_detection_latency_ms} />
-            <span className="text-xs text-muted">ms</span>
-          </>
+          s.last_detection_latency_ms < 1 ? (
+            <>
+              <span className="font-mono">&lt;&nbsp;1</span>
+              <span className="text-xs text-muted">ms</span>
+            </>
+          ) : (
+            <>
+              <AnimatedNumber value={s.last_detection_latency_ms} decimals={s.last_detection_latency_ms < 10 ? 1 : 0} />
+              <span className="text-xs text-muted">ms</span>
+            </>
+          )
         ) : (
           <span className="font-mono text-muted">—</span>
         )}
