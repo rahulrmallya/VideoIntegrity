@@ -341,6 +341,7 @@ def test_watchdog_arms_on_first_packet_and_reports_once(stream: Stream) -> None:
     assert event is not None
     assert event.severity == "warning"
     assert event.evidence.sample_seq == 0
+    assert event.seq_from == event.seq_to == 1
     assert event.explanation == "No signed frames reached the viewer for 3 s."
     stream.clock.now = 7.0
     assert stream.verifier.tick(stream.clock.now) is None

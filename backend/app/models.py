@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 Source = Literal["webcam", "file", "synthetic"]
 AttackType = Literal[
@@ -41,11 +41,11 @@ class StartRequest(BaseModel):
     source: Source
     camera_index: int | None = None
     file_path: str | None = None
-    fps: float = 15
-    width: int = 640
-    height: int = 480
-    jpeg_quality: int = 80
-    checkpoint_interval: int = 15
+    fps: float = Field(default=15, gt=0, allow_inf_nan=False)
+    width: int = Field(default=640, gt=0)
+    height: int = Field(default=480, gt=0)
+    jpeg_quality: int = Field(default=80, ge=0, le=100)
+    checkpoint_interval: int = Field(default=15, gt=0)
 
 
 class Seal(BaseModel):
@@ -54,7 +54,7 @@ class Seal(BaseModel):
     last_seq: int
     chain_hash: str
     frame_count: int
-    signature: str
+    signature: str | None
 
 
 class Session(BaseModel):
@@ -131,7 +131,7 @@ class ExportResult(BaseModel):
 class IncidentEvidence(BaseModel):
     """Frame-level evidence for an integrity incident."""
 
-    sample_seq: int
+    sample_seq: int | None
     expected_hash: str | None
     actual_hash: str | None
     expected_prev: str | None

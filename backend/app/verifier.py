@@ -81,7 +81,6 @@ class Verifier:
         self.reanchored_in_window = False
         self.incident_manager = IncidentManager(on_incident)
         self.last_delivery_time: float | None = None
-        self._last_delivered_seq = 0
         self._clock = clock
         self._silence_limit = 2 * checkpoint_interval / fps
         self._silence_reported = False
@@ -102,7 +101,6 @@ class Verifier:
         header = packet.header
         seq = header.seq
         self.last_delivery_time = self._clock()
-        self._last_delivered_seq = seq
         self._silence_reported = False
 
         reasons: list[IncidentKind] = []
@@ -213,8 +211,10 @@ class Verifier:
         self._silence_reported = True
         return self._fail(
             "STREAM_INTERRUPTED",
-            self._last_delivered_seq,
+            self.expected_seq - 1,
             f"No delivery for {elapsed:g} s; last chain hash {crypto.short(self.anchor)}",
+            seq_from=self.expected_seq,
+            seq_to=self.expected_seq,
             silence_s=elapsed,
         )
 

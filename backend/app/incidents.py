@@ -182,7 +182,7 @@ class IncidentManager:
         if kind == "FRAME_DELETED":
             incident.missing_count += self._missing.add(seq_from, seq_to)
         elif kind == "FRAME_REORDERED":
-            if self._missing.discard(evidence.sample_seq):
+            if evidence.sample_seq is not None and self._missing.discard(evidence.sample_seq):
                 incident.missing_count -= 1
             if incident.kind == "FRAME_DELETED":
                 incident.kind = kind
@@ -207,6 +207,18 @@ class IncidentManager:
         self._affected = _RecentRanges()
         self._missing = _RecentRanges()
         self._closed.append(incident)
+        return self._emit(incident)
+
+    def acknowledge(self, incident_id: str) -> Incident | None:
+        """Acknowledge an open or retained incident and publish the change."""
+        incident = self._open
+        if incident is None or incident.id != incident_id:
+            incident = next((item for item in self._closed if item.id == incident_id), None)
+        if incident is None:
+            return None
+        if incident.acknowledged:
+            return incident.model_copy(deep=True)
+        incident.acknowledged = True
         return self._emit(incident)
 
     def _emit(self, incident: Incident) -> Incident:
