@@ -1,13 +1,24 @@
 """Session ledger and frame storage."""
 
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from app.models import ChainRecord, Seal, Session
+from app.models import ChainRecord, Seal, Session, StartRequest
 from app.producer import Packet
 
 FrameCopy = Literal["original", "received"]
+
+
+@dataclass(frozen=True)
+class CaptureSnapshot:
+    """A committed prefix of the append-only camera recording."""
+
+    vault: "Vault"
+    session: Session
+    settings: StartRequest
+    frame_count: int
 
 
 def _write(path: Path, data: bytes) -> None:

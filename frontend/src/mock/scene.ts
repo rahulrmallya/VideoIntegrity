@@ -47,9 +47,9 @@ export type SceneOptions = {
 
 /**
  * The "camera" scene: dark room, a desk, a moving glowing object that crosses the centre
- * (so blur / black-box attacks visibly hit it), REC dot, running clock and seq counter.
+ * (so blur / black-box attacks visibly hit it), REC dot and a burned-in running clock.
  */
-export function drawScene(ctx: Ctx, w: number, h: number, wallMs: number, seq: number, opts: SceneOptions = {}) {
+export function drawScene(ctx: Ctx, w: number, h: number, wallMs: number, _seq: number, opts: SceneOptions = {}) {
   const t = wallMs
   // background
   const bg = ctx.createLinearGradient(0, 0, 0, h)
@@ -120,14 +120,11 @@ export function drawScene(ctx: Ctx, w: number, h: number, wallMs: number, seq: n
   ctx.fillText('MOCK CAMERA', 40, 27)
   ctx.fillStyle = '#8a97ad'
   ctx.font = '400 13px "JetBrains Mono", monospace'
-  ctx.fillText(`CAM-01 · ${w}×${h}`, 40, 48)
-  ctx.textAlign = 'right'
-  ctx.fillText(date, w - 16, 27)
-  ctx.fillText(`#${seq}`, w - 16, h - 22)
-  ctx.textAlign = 'left'
+  ctx.fillText(`CAM-01 · ${w}×${h} · ${date}`, 40, 48)
+  // burned-in clock top-left like a CCTV camera; the UI HUD owns the bottom edge and the top-right corner
   ctx.fillStyle = '#e6edf7'
-  ctx.font = '500 30px "JetBrains Mono", monospace'
-  ctx.fillText(time, 16, h - 26)
+  ctx.font = '500 26px "JetBrains Mono", monospace'
+  ctx.fillText(time, 16, 80)
 }
 
 /** PIXEL_TAMPER: blur the central 40% × 40% region. */

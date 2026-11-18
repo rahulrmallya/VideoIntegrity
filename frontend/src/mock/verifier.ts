@@ -44,6 +44,8 @@ type Failure = {
   kind: IncidentKind
   seqs: number[]
   missing?: number[]
+  /** seq_from / seq_to when no seq is affected yet (STREAM_INTERRUPTED). */
+  range?: [number, number]
   proof: string
   evidence: Partial<IncidentEvidence> & { sample_seq: number }
 }
@@ -138,16 +140,17 @@ export class MockVerifier {
     return this.queue
   }
 
-  /** §5.8 watchdog — called on every producer tick. */
+  /** §5.8 watchdog — called on every producer tick. Armed only after the first packet (v1.2). */
   tick(now: number) {
-    if (this.silenceReported || now - this.lastDelivery <= this.watchdogMs) return
+    if (this.delivered === 0 || this.silenceReported || now - this.lastDelivery <= this.watchdogMs) return
     this.silenceReported = true
     const last = this.expectedSeq - 1
     this.fail({
       kind: 'STREAM_INTERRUPTED',
       seqs: [],
+      range: [this.expectedSeq, this.expectedSeq],
       proof: `No packet for ${((now - this.lastDelivery) / 1000).toFixed(1)} s after frame #${last}  (limit ${(this.watchdogMs / 1000).toFixed(1)} s)`,
-      evidence: { sample_seq: Math.max(0, last) },
+      evidence: { sample_seq: last },
     })
   }
 
@@ -406,8 +409,8 @@ export class MockVerifier {
       title: TEXT[f.kind].title,
       explanation: TEXT[f.kind].explanation,
       proof: f.proof,
-      seq_from: f.evidence.sample_seq,
-      seq_to: f.evidence.sample_seq,
+      seq_from: f.range?.[0] ?? f.evidence.sample_seq,
+      seq_to: f.range?.[1] ?? f.evidence.sample_seq,
       affected_count: 0,
       missing_count: 0,
       opened_at: nowIso(),

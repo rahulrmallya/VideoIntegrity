@@ -132,9 +132,9 @@ def test_start_replaces_running_session_and_falls_back(tmp_path: Path) -> None:
         assert (tmp_path / "sessions" / first_id / "seal.json").is_file()
 
         assert client.post("/api/session/start", json={"source": "synthetic", "fps": 0}).status_code == 422
-        assert client.get("/api/frames/0/diff.png").status_code == 501
-        assert client.post("/api/evidence/verify").status_code == 501
-        assert client.get("/api/reports/unused").status_code == 501
+        assert client.get("/api/frames/0/diff.png").status_code == 404
+        assert client.post("/api/evidence/verify").status_code == 422
+        assert client.get("/api/reports/unused").status_code == 404
         assert client.get("/api/frames/999999/original.jpg").status_code == 404
         assert client.post("/api/incidents/unknown/ack").status_code == 404
 

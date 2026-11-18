@@ -13,6 +13,7 @@ import type {
   Device,
   FrameMessage,
   Incident,
+  Integrity,
   LiveMessage,
   SealMessage,
   Session,
@@ -42,9 +43,14 @@ export type LiveState = {
   chain: ChainRecord[]
   /** Newest first, last 20. */
   seals: SealMessage[]
+  /** checkpoint seq → seal valid?, same 900-seq range as the timeline. */
+  checkpoints: Map<number, boolean>
   /** Newest first, upserted by id. */
   incidents: Incident[]
   activeAttack: AttackAck | null
+  /** Most recent attack that ended, and when (Date.now()). */
+  lastEndedAttack: AttackAck | null
+  lastEndedAt: number | null
 }
 
 const initial: LiveState = {
@@ -58,8 +64,11 @@ const initial: LiveState = {
   timelineHead: -1,
   chain: [],
   seals: [],
+  checkpoints: new Map(),
   incidents: [],
   activeAttack: null,
+  lastEndedAttack: null,
+  lastEndedAt: null,
 }
 
 export const useLive = create<LiveState>()(() => initial)
@@ -82,7 +91,16 @@ function upsertIncidents(list: Incident[], incoming: Incident[]): Incident[] {
 function onSession(session: Session) {
   const prev = get().session
   if (session.session_id && session.session_id !== prev?.session_id) {
-    set({ session, frame: null, timeline: new Map(), timelineHead: -1, chain: [], seals: [], activeAttack: null })
+    set({
+      session,
+      frame: null,
+      timeline: new Map(),
+      timelineHead: -1,
+      chain: [],
+      seals: [],
+      checkpoints: new Map(),
+      activeAttack: null,
+    })
   } else {
     set({ session })
   }
@@ -149,7 +167,11 @@ export function handleLiveMessage(msg: LiveMessage) {
       const chain = s.chain.map((r) =>
         r.seq === msg.seq && r.chain_hash === msg.chain_hash ? { ...r, signature: msg.signature } : r,
       )
-      set({ seals, chain })
+      const checkpoints = new Map(s.checkpoints)
+      checkpoints.set(msg.seq, msg.valid)
+      const min = Math.max(s.timelineHead, msg.seq) - TIMELINE_LIMIT + 1
+      for (const seq of checkpoints.keys()) if (seq < min) checkpoints.delete(seq)
+      set({ seals, chain, checkpoints })
       return
     }
 
@@ -167,7 +189,12 @@ export function handleLiveMessage(msg: LiveMessage) {
 
     case 'attack':
       if (msg.phase === 'started') set({ activeAttack: msg.attack })
-      else if (get().activeAttack?.attack_id === msg.attack.attack_id) set({ activeAttack: null })
+      else
+        set((s) => ({
+          activeAttack: s.activeAttack?.attack_id === msg.attack.attack_id ? null : s.activeAttack,
+          lastEndedAttack: msg.attack,
+          lastEndedAt: Date.now(),
+        }))
       return
   }
 }
@@ -204,7 +231,14 @@ export const useLatestSeal = () => useLive((s) => s.seals[0] ?? null)
 export const useIncidents = () => useLive((s) => s.incidents)
 export const useOpenIncident = () => useLive((s) => s.incidents.find((i) => i.status === 'open') ?? null)
 export const useActiveAttack = () => useLive((s) => s.activeAttack)
-export const useIntegrity = () => useLive((s) => s.stats?.integrity ?? 'IDLE')
+export const useLastEndedAttack = () => useLive(useShallow((s) => ({ attack: s.lastEndedAttack, at: s.lastEndedAt })))
+export const useIncident = (id: string | null) => useLive((s) => (id ? (s.incidents.find((i) => i.id === id) ?? null) : null))
+/** Derived from the store instantly (an incident message flips it), not from the 1 Hz stats. */
+export const useIntegrity = () =>
+  useLive((s): Integrity =>
+    s.incidents.some((i) => i.status === 'open') ? 'COMPROMISED' : s.session?.status === 'running' ? 'SECURE' : 'IDLE',
+  )
 export const useTimeline = () => useLive(useShallow((s) => ({ timeline: s.timeline, head: s.timelineHead })))
+export const useCheckpoints = () => useLive((s) => s.checkpoints)
 /** Status of a single seq — re-renders only when that seq changes. */
 export const useSeqStatus = (seq: number) => useLive((s) => s.timeline.get(seq) ?? null)

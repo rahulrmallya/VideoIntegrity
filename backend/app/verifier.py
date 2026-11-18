@@ -66,6 +66,7 @@ class Verifier:
         clock: Callable[[], float] = time.monotonic,
         *,
         on_incident: Callable[[Incident], None] | None = None,
+        offline: bool = False,
     ) -> None:
         """Start at genesis and arm the watchdog on the first delivery."""
         if checkpoint_interval <= 0 or fps <= 0:
@@ -82,6 +83,7 @@ class Verifier:
         self.incident_manager = IncidentManager(on_incident)
         self.last_delivery_time: float | None = None
         self._clock = clock
+        self._offline = offline
         self._silence_limit = 2 * checkpoint_interval / fps
         self._silence_reported = False
 
@@ -122,14 +124,10 @@ class Verifier:
         gap = seq > self.expected_seq
         if gap:
             first = self.expected_seq
-            self._fail(
-                "FRAME_DELETED",
-                first,
-                f"Expected frame #{first} → received #{seq}; prior hash {crypto.short(self.anchor)}",
-                seq_to=seq - 1,
-            )
+            self.report_gap(seq)
             reasons.append("FRAME_DELETED")
-            updates.extend((missing, "missing") for missing in range(first, seq))
+            if not self._offline:
+                updates.extend((missing, "missing") for missing in range(first, seq))
 
         # 3. Compare the actual payload with the recorded frame fingerprint.
         computed = crypto.sha256(packet.payload).hex()
@@ -152,6 +150,15 @@ class Verifier:
                 expected_hash=recomputed, actual_hash=header.chain_hash,
             )
             reasons.append("CHAIN_BROKEN")
+
+        checkpoint = header.is_checkpoint
+        if self._offline:
+            checkpoint = (seq + 1) % self.checkpoint_interval == 0
+            if (header.session_id != self.session_id or header.is_checkpoint != checkpoint
+                    or (not checkpoint and header.signature is not None)):
+                self._fail("CHAIN_BROKEN", seq, f"Invalid producer header at frame #{seq}")
+                if "CHAIN_BROKEN" not in reasons:
+                    reasons.append("CHAIN_BROKEN")
 
         # 5. Re-anchor at a broken predecessor, even when a gap explains it.
         if header.prev_hash != self.anchor:
@@ -190,7 +197,7 @@ class Verifier:
 
         # 7. Resolve the window when a checkpoint arrives.
         seal = None
-        if header.is_checkpoint:
+        if checkpoint:
             seal = self._check_checkpoint(header, updates)
             if not seal.valid:
                 reasons.append("CHAIN_FORGED")
@@ -203,7 +210,7 @@ class Verifier:
     def tick(self, now: float) -> Incident | None:
         """Report at most one interruption until another packet is delivered."""
         # 8. The watchdog runs on producer ticks, including ticks with no delivery.
-        if self.last_delivery_time is None or self._silence_reported:
+        if self._offline or self.last_delivery_time is None or self._silence_reported:
             return None
         elapsed = now - self.last_delivery_time
         if elapsed < self._silence_limit:
@@ -216,6 +223,16 @@ class Verifier:
             seq_from=self.expected_seq,
             seq_to=self.expected_seq,
             silence_s=elapsed,
+        )
+
+    def report_gap(self, next_seq: int) -> Incident:
+        """Report the missing range before the next known sequence boundary."""
+        first = self.expected_seq
+        return self._fail(
+            "FRAME_DELETED",
+            first,
+            f"Expected frame #{first}; missing through #{next_seq - 1}; prior hash {crypto.short(self.anchor)}",
+            seq_to=next_seq - 1,
         )
 
     def _check_late(

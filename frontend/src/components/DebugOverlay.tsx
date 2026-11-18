@@ -76,14 +76,14 @@ export function DebugOverlay() {
 
   if (!open) {
     return (
-      <button className={`fixed right-3 bottom-3 z-50 ${btn}`} onClick={() => setOpen(true)}>
+      <button className={`fixed top-16 right-3 z-50 ${btn}`} onClick={() => setOpen(true)}>
         debug
       </button>
     )
   }
 
   return (
-    <aside className="fixed right-3 bottom-3 z-50 w-[340px] rounded-lg border border-border bg-surface/95 p-3 font-mono text-[11px] text-muted shadow-2xl shadow-black/60 backdrop-blur">
+    <aside className="fixed top-16 right-3 z-50 w-[340px] rounded-lg border border-border bg-surface/95 p-3 font-mono text-[11px] text-muted shadow-2xl shadow-black/60 backdrop-blur">
       <div className="mb-2 flex items-center justify-between">
         <span className="text-text">
           DEBUG · {IS_MOCK ? 'MOCK' : 'LIVE'} ·{' '}

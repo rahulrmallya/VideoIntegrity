@@ -17,7 +17,7 @@ import type {
   TamperSampleMode,
   VerificationReport,
 } from '../api/types'
-import { AttackEngine, CATALOG } from './attacks'
+import { AttackEngine, CATALOG, validateParams } from './attacks'
 import {
   base64ToBytes,
   chainHash,
@@ -101,6 +101,8 @@ export class MockBackend {
   private incidents: Incident[] = []
   private counters = { incident: 0, attack: 0, report: 0, vincident: 0 }
   private readonly diffs = new Map<number, string>()
+  /** evidence.sample_seq of every incident: never evicted, rendered first. */
+  private readonly pinnedDiffs = new Set<number>()
   private diffQueue: Promise<void> = Promise.resolve()
   private readonly packages = new Map<string, PackageInfo>()
   private latestExport: PackageInfo | null = null
@@ -225,6 +227,7 @@ export class MockBackend {
         emit: (m) => this.broadcast(m),
         nextAttackId: () => id4('atk', ++this.counters.attack),
         checkpointInterval: ci,
+        hasDelivered: () => run.verifier.delivered > 0,
         tamperPixels: (pkt) => this.tamperPixels(run, pkt),
         forge: (pkt, prev) => this.forge(run, pkt, prev),
         makeFake: (seq, prev) => this.makeFake(run, seq, prev),
@@ -234,6 +237,7 @@ export class MockBackend {
 
     this.run = run
     this.diffs.clear()
+    this.pinnedDiffs.clear()
     this.session = {
       session_id: sessionId,
       status: 'running',
@@ -418,18 +422,34 @@ export class MockBackend {
     this.diffQueue = this.diffQueue
       .then(async () => {
         await sleep(15) // stay out of the capture loop's way
-        const original = run.vault.get(seq)
-        const received = run.verifier.received.get(seq)
-        if (this.run !== run || !original || !received || this.diffs.has(seq)) return
-        this.diffs.set(seq, await makeDiffPng(base64ToBytes(original), base64ToBytes(received), run.w, run.h))
-        if (this.diffs.size > DIFF_LIMIT) this.diffs.delete(this.diffs.keys().next().value as number)
+        await this.renderDiff(run, seq)
       })
       .catch((err: unknown) => console.error('[mock diff]', err))
+  }
+
+  private async renderDiff(run: Run, seq: number) {
+    const original = run.vault.get(seq)
+    const received = run.verifier.received.get(seq)
+    if (this.run !== run || !original || !received || this.diffs.has(seq)) return
+    this.diffs.set(seq, await makeDiffPng(base64ToBytes(original), base64ToBytes(received), run.w, run.h))
+    while (this.diffs.size > DIFF_LIMIT) {
+      // evict the oldest diff that is not an incident's evidence frame (the drawer shows those)
+      const victim = [...this.diffs.keys()].find((k) => !this.pinnedDiffs.has(k))
+      if (victim === undefined) break
+      this.diffs.delete(victim)
+    }
   }
 
   // --- incidents / stats ---------------------------------------------------------------------------
 
   private upsertIncident(inc: Incident) {
+    const seq = inc.evidence.sample_seq
+    if (!this.pinnedDiffs.has(seq)) {
+      this.pinnedDiffs.add(seq)
+      // jump the queue so the drawer has it straight away
+      const run = this.run
+      if (run) setTimeout(() => void this.renderDiff(run, seq).catch(() => {}), 60)
+    }
     const i = this.incidents.findIndex((x) => x.id === inc.id)
     if (i >= 0) {
       inc.acknowledged = this.incidents[i].acknowledged || inc.acknowledged
@@ -687,6 +707,7 @@ export class MockBackend {
       getAttackCatalog: () => call(() => CATALOG),
       launchAttack: (type: AttackType, params = {}) =>
         call((): AttackAck => {
+          validateParams(type, params) // 422 before 409, like FastAPI body validation
           if (!this.run?.timer) throw new ApiRequestError(409, 'No session is running')
           return this.run.engine.launch(type, params)
         }),

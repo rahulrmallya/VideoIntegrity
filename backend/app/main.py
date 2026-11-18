@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -17,7 +17,12 @@ from app import crypto
 from app.broadcaster import Broadcaster
 from app.channel import CATALOG, AttackConflict
 from app.config import DATA_DIR, utc_timestamp
-from app.models import AttackAck, AttackInfo, AttackRequest, ChainRecord, Device, Incident, Session, StartRequest, Stats
+from app.evidence import EvidenceConflict, EvidenceStore, diff_png
+from app.models import (
+    AttackAck, AttackInfo, AttackRequest, ChainRecord, Device, ExportResult, Incident, Session,
+    StartRequest, Stats, TamperRequest, VerificationReport,
+)
+from app.package_verifier import InvalidPackage
 from app.pipeline import Pipeline
 from app.vault import FrameCopy
 
@@ -41,6 +46,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     pipeline = Pipeline(asyncio.get_running_loop(), broadcaster, data_dir, device, sk, pk_raw)
     application.state.broadcaster = broadcaster
     application.state.pipeline = pipeline
+    application.state.evidence = EvidenceStore(data_dir / "exports")
     try:
         yield
     finally:
@@ -194,30 +200,69 @@ def received_frame(seq: int, request: Request) -> FileResponse:
     return _frame(request, seq, "received")
 
 
-@router.post("/api/evidence/export", status_code=501)
-@router.post("/api/evidence/verify", status_code=501)
-@router.post("/api/evidence/tamper-sample", status_code=501)
-def deferred_post() -> None:
-    """Return 501 for features deferred beyond live capture."""
-    raise HTTPException(501, "This endpoint is not implemented yet")
+@router.post("/api/evidence/export", response_model_exclude_none=True)
+def evidence_export(request: Request) -> ExportResult:
+    """Package the committed camera recording without stopping capture."""
+    pipeline: Pipeline = request.app.state.pipeline
+    snapshot = pipeline.evidence_snapshot()
+    if snapshot is None:
+        raise HTTPException(409, "No recorded session to export")
+    evidence: EvidenceStore = request.app.state.evidence
+    return evidence.export(snapshot, pipeline.device)
 
 
-@router.get("/api/evidence/download/{filename}", status_code=501)
-def evidence_download(filename: str) -> None:
-    """Return 501 for evidence downloads."""
-    raise HTTPException(501, "This endpoint is not implemented yet")
+@router.get("/api/evidence/download/{filename}")
+def evidence_download(filename: str, request: Request) -> FileResponse:
+    """Download a published evidence ZIP."""
+    path = request.app.state.evidence.download(filename)
+    if path is None:
+        raise HTTPException(404, "Evidence package not found")
+    return FileResponse(path, media_type="application/zip", filename=filename)
 
 
-@router.get("/api/reports/{report_id}", status_code=501)
-def report(report_id: str) -> None:
-    """Return 501 for verification reports."""
-    raise HTTPException(501, "This endpoint is not implemented yet")
+@router.post("/api/evidence/verify")
+def evidence_verify(file: UploadFile, request: Request) -> VerificationReport:
+    """Verify the uploaded archive against its packaged public key."""
+    evidence: EvidenceStore = request.app.state.evidence
+    try:
+        return evidence.verify(file.file, file.filename)
+    except InvalidPackage as error:
+        raise HTTPException(400, str(error)) from error
 
 
-@router.get("/api/frames/{seq}/diff.png", status_code=501)
-def diff_frame(seq: int) -> None:
-    """Return 501 for frame difference images."""
-    raise HTTPException(501, "This endpoint is not implemented yet")
+@router.post("/api/evidence/tamper-sample")
+def tamper_sample(settings: TamperRequest, request: Request) -> ExportResult:
+    """Create a deliberately altered copy of the latest export."""
+    evidence: EvidenceStore = request.app.state.evidence
+    try:
+        return evidence.tamper_sample(settings.mode)
+    except EvidenceConflict as error:
+        raise HTTPException(409, str(error)) from error
+
+
+@router.get("/api/reports/{report_id}")
+def report(report_id: str, request: Request) -> VerificationReport:
+    """Look up a verification report retained by the server."""
+    evidence: EvidenceStore = request.app.state.evidence
+    result = evidence.report(report_id)
+    if result is None:
+        raise HTTPException(404, "Verification report not found")
+    return result
+
+
+@router.get("/api/frames/{seq}/diff.png")
+def diff_frame(seq: int, request: Request) -> Response:
+    """Return the PNG overlay comparing the original and received JPEGs."""
+    pipeline: Pipeline = request.app.state.pipeline
+    paths = pipeline.frame_pair(seq)
+    if paths is None:
+        raise HTTPException(404, "Original or received frame not found")
+    try:
+        return Response(diff_png(*paths), media_type="image/png")
+    except FileNotFoundError as error:
+        raise HTTPException(404, "Original or received frame not found") from error
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
 
 
 async def _wait_for_disconnect(websocket: WebSocket) -> None:

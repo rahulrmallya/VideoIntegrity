@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 Source = Literal["webcam", "file", "synthetic"]
+TamperMode = Literal["modify", "delete", "truncate"]
 AttackType = Literal[
     "PIXEL_TAMPER",
     "FRAME_DROP",
@@ -133,6 +134,12 @@ class ExportResult(BaseModel):
     package_sha256: str
     frame_count: int
     description: str | None = None
+
+
+class TamperRequest(BaseModel):
+    """The requested modification to an exported sample."""
+
+    mode: TamperMode
 
 
 class IncidentEvidence(BaseModel):

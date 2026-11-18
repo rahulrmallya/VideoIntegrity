@@ -63,7 +63,14 @@ async function readError(res: Response): Promise<string> {
     const body: unknown = await res.json()
     if (body && typeof body === 'object' && 'detail' in body) {
       const detail = (body as { detail: unknown }).detail
-      return typeof detail === 'string' ? detail : JSON.stringify(detail)
+      if (typeof detail === 'string') return detail
+      // FastAPI validation errors: [{loc, msg, type}, …]
+      if (Array.isArray(detail)) {
+        return detail
+          .map((d) => (d && typeof d === 'object' && 'msg' in d ? String((d as { msg: unknown }).msg) : JSON.stringify(d)))
+          .join('; ')
+      }
+      return JSON.stringify(detail)
     }
   } catch {
     // not JSON — fall through

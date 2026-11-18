@@ -56,6 +56,8 @@ export type ChannelDeps = {
   emit(msg: LiveMessage): void
   nextAttackId(): string
   checkpointInterval: number
+  /** true once the verifier has received at least one packet. */
+  hasDelivered(): boolean
   tamperPixels(pkt: MockPacket): Promise<MockPacket>
   forge(pkt: MockPacket, prevChain: string): Promise<MockPacket>
   makeFake(seq: number, prevChain: string): Promise<MockPacket>
@@ -76,11 +78,41 @@ type Running = {
   forged: number
 }
 
-const RING = 45
+/** Ring of forwarded packets, big enough for the largest LOOP_REPLAY (v1.3: 90). */
+const RING = 90
 
-function num(params: Record<string, unknown>, key: string, fallback: number): number {
-  const v = params[key]
-  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : fallback
+type ParamSpec = { min: number; max: number; int: boolean; def: number }
+
+/** CONTRACT v1.3 (c): supported params; unknown key or out-of-range value → 422. */
+const PARAMS: Record<AttackType, Record<string, ParamSpec>> = {
+  PIXEL_TAMPER: { frames: { min: 1, max: 150, int: true, def: 30 } },
+  FRAME_DROP: { count: { min: 1, max: 60, int: true, def: 10 } },
+  FRAME_INSERT: {},
+  FRAME_REORDER: {},
+  LOOP_REPLAY: { frames: { min: 15, max: 90, int: true, def: 45 } },
+  CHAIN_FORGE: { min_frames: { min: 1, max: 30, int: true, def: 5 } },
+  STREAM_CUT: { seconds: { min: 2.5, max: 10, int: false, def: 4 } },
+}
+
+export function validateParams(type: AttackType, params: Record<string, unknown>): Record<string, number> {
+  const spec = PARAMS[type]
+  const out: Record<string, number> = {}
+  for (const [key, s] of Object.entries(spec)) out[key] = s.def
+  for (const [key, v] of Object.entries(params ?? {})) {
+    const s = spec[key]
+    if (!s) {
+      const allowed = Object.keys(spec)
+      throw new ApiRequestError(
+        422,
+        `${type} does not accept "${key}"${allowed.length ? ` (allowed: ${allowed.join(', ')})` : ' (it takes no params)'}`,
+      )
+    }
+    if (typeof v !== 'number' || !Number.isFinite(v) || (s.int && !Number.isInteger(v)) || v < s.min || v > s.max) {
+      throw new ApiRequestError(422, `${type}.${key} must be ${s.int ? 'an integer' : 'a number'} from ${s.min} to ${s.max}`)
+    }
+    out[key] = v
+  }
+  return out
 }
 
 export class AttackEngine {
@@ -96,9 +128,11 @@ export class AttackEngine {
   }
 
   launch(type: AttackType, params: Record<string, unknown>): AttackAck {
-    if (this.active) throw new ApiRequestError(409, `Attack ${this.active.ack.attack_id} (${this.active.ack.type}) is still running`)
+    // body validation (422) comes before state checks (409), as with FastAPI
     const info = CATALOG.find((c) => c.type === type)
     if (!info) throw new ApiRequestError(422, `Unknown attack type: ${String(type)}`)
+    const p = validateParams(type, params)
+    if (this.active) throw new ApiRequestError(409, `Attack ${this.active.ack.attack_id} (${this.active.ack.type}) is still running`)
     const ack: AttackAck = {
       attack_id: this.deps.nextAttackId(),
       type,
@@ -106,22 +140,13 @@ export class AttackEngine {
       started_at: new Date().toISOString(),
       expected_kind: info.expected_kind,
     }
-    const defaults: Record<AttackType, number> = {
-      PIXEL_TAMPER: 30,
-      FRAME_DROP: 10,
-      FRAME_INSERT: 1,
-      FRAME_REORDER: 1,
-      LOOP_REPLAY: 45,
-      CHAIN_FORGE: 5,
-      STREAM_CUT: 0,
-    }
     this.active = {
       ack,
       firstEffectAt: null,
       endedAt: null,
       linked: false,
-      remaining: num(params, 'count', defaults[type]),
-      cutMs: num(params, 'seconds', 4) * 1000,
+      remaining: p.frames ?? p.count ?? p.min_frames ?? 1,
+      cutMs: (p.seconds ?? 4) * 1000,
       held: null,
       replay: null,
       cutStart: null,
@@ -197,8 +222,14 @@ export class AttackEngine {
         return
       }
       case 'LOOP_REPLAY': {
-        a.replay ??= this.ring.slice(-Math.min(a.remaining, this.ring.length))
-        a.remaining = Math.min(a.remaining, a.replay.length)
+        if (!a.replay) {
+          // v1.3 (b): wait until enough packets have been forwarded to replay
+          if (this.ring.length < a.remaining) {
+            this.out(pkt)
+            return
+          }
+          a.replay = this.ring.slice(-a.remaining)
+        }
         const old = a.replay.shift()
         if (!old) {
           this.out(pkt)
@@ -230,6 +261,11 @@ export class AttackEngine {
         return
       }
       case 'STREAM_CUT': {
+        // v1.3 (b): only once the verifier has received something (its watchdog is armed)
+        if (a.cutStart === null && !this.deps.hasDelivered()) {
+          this.out(pkt)
+          return
+        }
         a.cutStart ??= now
         effect()
         if (now - a.cutStart < a.cutMs) return

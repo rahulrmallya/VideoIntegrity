@@ -24,7 +24,7 @@ from app.models import (
 )
 from app.producer import Packet, Producer
 from app.sources import FrameSource, open_source
-from app.vault import FrameCopy, Vault
+from app.vault import CaptureSnapshot, FrameCopy, Vault
 from app.verifier import SEEN_LIMIT, TimelineStatus, Verifier, VerifyResult
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,7 @@ class _Run:
     producer: Producer
     channel: Channel
     verifier: Verifier
+    settings: StartRequest
     started: float
     metrics: _Metrics
     incident_events: list[Incident]
@@ -183,6 +184,24 @@ class Pipeline:
             return None
         path = run.vault.frame_path(seq, copy)
         return path if path.is_file() else None
+
+    def frame_pair(self, seq: int) -> tuple[Path, Path] | None:
+        """Locate both image paths in the same capture session."""
+        with self._state:
+            run = self._run
+        if run is None:
+            return None
+        return run.vault.frame_path(seq, "original"), run.vault.frame_path(seq, "received")
+
+    def evidence_snapshot(self) -> CaptureSnapshot | None:
+        """Pin a committed ledger prefix without pausing capture for ZIP creation."""
+        with self._state:
+            run = self._run
+            header = run.vault.last_header if run is not None else None
+            if run is None or header is None:
+                return None
+            return CaptureSnapshot(run.vault, self._session.model_copy(deep=True),
+                                   run.settings, header.seq + 1)
 
     def incidents(self) -> list[Incident]:
         """Return the current session's incident history."""
@@ -296,6 +315,7 @@ class Pipeline:
                 Producer(session_id, self._sk, self._pk_raw, request.checkpoint_interval),
                 channel,
                 verifier,
+                request,
                 started,
                 _Metrics(sample_time=started),
                 incidents,
