@@ -136,7 +136,7 @@ class IncidentEvidence(BaseModel):
     actual_hash: str | None
     expected_prev: str | None
     actual_prev: str | None
-    visual_change_pct: float
+    visual_change_pct: float | None
 
 
 class Incident(BaseModel):
