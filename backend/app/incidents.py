@@ -4,7 +4,7 @@ from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from app.models import Incident, IncidentEvidence, IncidentKind
+from app.models import AttackAck, Incident, IncidentEvidence, IncidentKind
 
 RECENT_LIMIT = 900
 
@@ -113,6 +113,7 @@ class IncidentManager:
     def __init__(self, on_event: Callable[[Incident], None] | None = None) -> None:
         """Create a session-local incident manager with an optional event sink."""
         self._on_event = on_event
+        self.attack_context: Callable[[], tuple[AttackAck, float] | None] | None = None
         self._open: Incident | None = None
         self._closed: deque[Incident] = deque(maxlen=RECENT_LIMIT)
         self._affected = _RecentRanges()
@@ -148,6 +149,8 @@ class IncidentManager:
         if incident is None:
             self.total += 1
             self._primary_span = (seq_from, seq_to)
+            context = self.attack_context() if self.attack_context is not None else None
+            attack, latency = context if context is not None else (None, None)
             incident = Incident(
                 id=f"inc_{self.total:04d}",
                 kind=kind,
@@ -163,9 +166,9 @@ class IncidentManager:
                 missing_count=0,
                 opened_at=_utc_now(),
                 closed_at=None,
-                detection_latency_ms=None,
-                attack_id=None,
-                attack_type=None,
+                detection_latency_ms=latency,
+                attack_id=attack.attack_id if attack is not None else None,
+                attack_type=attack.type if attack is not None else None,
                 evidence=evidence.model_copy(),
                 acknowledged=False,
             )

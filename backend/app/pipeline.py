@@ -6,8 +6,10 @@ import time
 from base64 import b64encode
 from collections import Counter, OrderedDict
 from dataclasses import asdict, dataclass, field
+from itertools import count
 from pathlib import Path
 from threading import Event, Lock, Thread
+from typing import Literal
 from uuid import uuid4
 
 import cv2
@@ -15,9 +17,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from app import crypto
 from app.broadcaster import Broadcaster, Message
-from app.channel import Channel
+from app.channel import AttackConflict, Channel
 from app.config import utc_timestamp
-from app.models import ChainRecord, Device, Incident, Seal, Session, StartRequest, Stats
+from app.models import (
+    AttackAck, AttackRequest, ChainRecord, Device, Incident, Seal, Session, StartRequest, Stats,
+)
 from app.producer import Packet, Producer
 from app.sources import FrameSource, open_source
 from app.vault import FrameCopy, Vault
@@ -69,6 +73,7 @@ class _Run:
 
     vault: Vault
     producer: Producer
+    channel: Channel
     verifier: Verifier
     started: float
     metrics: _Metrics
@@ -106,6 +111,7 @@ class Pipeline:
         self._pk_raw = pk_raw
         self._lifecycle = Lock()
         self._state = Lock()
+        self._attack_ids = count(1)
         self._thread: Thread | None = None
         self._stop_signal = Event()
         self._seal_error: Exception | None = None
@@ -183,6 +189,17 @@ class Pipeline:
         with self._state:
             return [] if self._run is None else self._run.verifier.incidents
 
+    def start_attack(self, request: AttackRequest) -> AttackAck:
+        """Schedule an attack on the current session's capture channel."""
+        with self._state:
+            run = self._run
+            if (run is None or self._session.status != "running"
+                    or run.stopped is not None or self._stop_signal.is_set()):
+                raise AttackConflict("No session is running")
+            ack = run.channel.attacks.start(request.type, request.params)
+            self._publish_attack(ack, "started")
+            return ack
+
     def acknowledge(self, incident_id: str) -> Incident | None:
         """Acknowledge an incident and publish it to listeners."""
         with self._state:
@@ -242,6 +259,10 @@ class Pipeline:
             self._publish({"type": "incident", "incident": incident.model_dump(mode="json")})
         run.incident_events.clear()
 
+    def _publish_attack(self, ack: AttackAck, phase: Literal["started", "ended"]) -> None:
+        """Enqueue a contract attack lifecycle message."""
+        self._publish({"type": "attack", "attack": ack.model_dump(mode="json"), "phase": phase})
+
     def _capture(self, request: StartRequest, startup: _Startup) -> None:
         """Read, persist, and deliver frames on a paced daemon thread."""
         source: FrameSource | None = None
@@ -266,16 +287,19 @@ class Pipeline:
             assert session_id is not None
             started = time.monotonic()
             incidents: list[Incident] = []
+            channel = Channel(jpeg_quality=request.jpeg_quality, attack_ids=self._attack_ids)
+            verifier = Verifier(session_id, self._pk_raw, request.checkpoint_interval, request.fps,
+                                on_incident=incidents.append)
+            verifier.incident_manager.attack_context = channel.attacks.incident_context
             run = _Run(
                 Vault(self._sessions_dir, session),
                 Producer(session_id, self._sk, self._pk_raw, request.checkpoint_interval),
-                Verifier(session_id, self._pk_raw, request.checkpoint_interval, request.fps,
-                         on_incident=incidents.append),
+                channel,
+                verifier,
                 started,
                 _Metrics(sample_time=started),
                 incidents,
             )
-            channel = Channel()
             period = 1 / request.fps
             deadline = started
             encode_options = [cv2.IMWRITE_JPEG_QUALITY, request.jpeg_quality]
@@ -305,7 +329,7 @@ class Pipeline:
                     run.vault.save_original(packet)
                     if not startup.ready.is_set():
                         self._publish_session(run, session)
-                    self._forward(run, packet, channel)
+                    self._forward(run, packet)
                     startup.ready.set()
 
                 now = time.monotonic()
@@ -333,10 +357,12 @@ class Pipeline:
             finally:
                 startup.ready.set()
 
-    def _forward(self, run: _Run, packet: Packet, channel: Channel) -> None:
+    def _forward(self, run: _Run, packet: Packet) -> None:
         """Process each channel delivery and publish its corresponding updates."""
-        delivered = channel.process(packet)
         with self._state:
+            attacks = run.channel.attacks
+            active = attacks.active
+            delivered = run.channel.process(packet)
             metrics = run.metrics
             metrics.frames_produced += 1
             metrics.hash_ms += run.producer.hash_ms
@@ -347,16 +373,22 @@ class Pipeline:
                 result = run.verifier.process(incoming)
                 limit = max(SEEN_LIMIT, self._session.checkpoint_interval)
                 metrics.apply(result, limit)
-                self._publish_frame(run, incoming, result)
+                self._publish_frame(run, incoming, result, packet)
             if not delivered:
                 run.verifier.tick(time.monotonic())
                 self._publish_incidents(run)
+            if active is not None and attacks.active is None:
+                self._publish_attack(active, "ended")
 
-    def _publish_frame(self, run: _Run, packet: Packet, result: VerifyResult) -> None:
+    def _publish_frame(self, run: _Run, packet: Packet, result: VerifyResult, original: Packet) -> None:
         """Store tampered bytes before publishing the frame and timeline updates."""
         header = packet.header
         if result.verdict == "tampered":
-            run.vault.save_received(header.seq, packet.payload)
+            payload = packet.payload
+            if packet is original and "FRAME_INSERTED" in result.reasons:
+                # The genuine packet arrived second. Keep the earlier fake as evidence.
+                payload = run.pending.get(header.seq, payload)
+            run.vault.save_received(header.seq, payload)
         for seq, status in result.status_updates:
             if status == "pending" and seq == header.seq:
                 run.pending[seq] = packet.payload
@@ -447,4 +479,7 @@ class Pipeline:
             with self._state:
                 run.stopped = time.monotonic()
                 run.pending.clear()
+                attack = run.channel.attacks.cancel()
+                if attack is not None:
+                    self._publish_attack(attack, "ended")
             self._publish_session(run, stopped)

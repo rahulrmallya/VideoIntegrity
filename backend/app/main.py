@@ -15,39 +15,15 @@ from fastapi.staticfiles import StaticFiles
 
 from app import crypto
 from app.broadcaster import Broadcaster
+from app.channel import CATALOG, AttackConflict
 from app.config import DATA_DIR, utc_timestamp
-from app.models import AttackInfo, ChainRecord, Device, Incident, Session, StartRequest, Stats
+from app.models import AttackAck, AttackInfo, AttackRequest, ChainRecord, Device, Incident, Session, StartRequest, Stats
 from app.pipeline import Pipeline
 from app.vault import FrameCopy
 
 OPENAPI_URL = "/openapi.json"
 DOCS_ASSETS_URL = "/docs/assets"
 router = APIRouter()
-
-CATALOG = (
-    AttackInfo(type="PIXEL_TAMPER", label="Erase an object",
-               description="Blurs the central region of the next 30 frames.",
-               expected_kind="FRAME_MODIFIED"),
-    AttackInfo(type="FRAME_DROP", label="Delete frames",
-               description="Silently drops the next 10 packets.",
-               expected_kind="FRAME_DELETED"),
-    AttackInfo(type="FRAME_INSERT", label="Insert a fake frame",
-               description="Sends a synthetic frame claiming the next genuine sequence.",
-               expected_kind="FRAME_INSERTED"),
-    AttackInfo(type="FRAME_REORDER", label="Swap two frames",
-               description="Delivers the next two packets out of order.",
-               expected_kind="FRAME_REORDERED"),
-    AttackInfo(type="LOOP_REPLAY", label="Loop old footage",
-               description="Replays the last 45 forwarded packets instead of live footage.",
-               expected_kind="REPLAY_DETECTED"),
-    AttackInfo(type="CHAIN_FORGE", label="Smart forgery",
-               description="Alters frames and recomputes hashes while retaining the original signature.",
-               expected_kind="CHAIN_FORGED"),
-    AttackInfo(type="STREAM_CUT", label="Cut the feed",
-               description="Drops all packets for four seconds.",
-               expected_kind="STREAM_INTERRUPTED"),
-)
-
 
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -166,6 +142,17 @@ def attack_catalog() -> tuple[AttackInfo, ...]:
     return CATALOG
 
 
+@router.post("/api/attacks")
+def start_attack(settings: AttackRequest, request: Request) -> AttackAck:
+    """Acknowledge a demo attack on the running session."""
+    try:
+        return request.app.state.pipeline.start_attack(settings)
+    except AttackConflict as error:
+        raise HTTPException(409, str(error)) from error
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+
+
 @router.get("/api/incidents")
 def incidents(request: Request) -> list[Incident]:
     """Return recent incidents, newest first."""
@@ -207,7 +194,6 @@ def received_frame(seq: int, request: Request) -> FileResponse:
     return _frame(request, seq, "received")
 
 
-@router.post("/api/attacks", status_code=501)
 @router.post("/api/evidence/export", status_code=501)
 @router.post("/api/evidence/verify", status_code=501)
 @router.post("/api/evidence/tamper-sample", status_code=501)

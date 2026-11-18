@@ -117,6 +117,13 @@ class AttackAck(BaseModel):
     expected_kind: str
 
 
+class AttackRequest(BaseModel):
+    """An attack selection and its optional parameters."""
+
+    type: AttackType
+    params: dict[str, object] = Field(default_factory=dict)
+
+
 class ExportResult(BaseModel):
     """Metadata for a downloadable evidence package."""
 
