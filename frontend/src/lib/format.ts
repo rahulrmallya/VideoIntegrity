@@ -51,3 +51,15 @@ export const STATUS_COLOR = {
   raised: '#141C2E',
   muted: '#8A97AD',
 } as const
+
+export function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(2)} MB`
+}
+
+export function fmtDateTime(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'medium' })
+}

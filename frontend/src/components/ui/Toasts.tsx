@@ -33,7 +33,7 @@ export function Toaster() {
   const toasts = useToasts((s) => s.toasts)
   const dismiss = useToasts((s) => s.dismiss)
   return (
-    <div className="pointer-events-none fixed right-4 bottom-[calc(clamp(176px,24vh,224px)+2.25rem)] z-40 flex w-80 flex-col gap-2">
+    <div className="pointer-events-none fixed right-4 print:hidden bottom-[calc(clamp(176px,24vh,224px)+2.25rem)] z-40 flex w-80 flex-col gap-2">
       {/* enter animation only: exit animations stall when the window is occluded and toasts would pile up */}
       {toasts.map((t) => {
           const { cls, Icon } = STYLE[t.tone]

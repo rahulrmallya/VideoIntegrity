@@ -32,8 +32,8 @@ function Stamp({ seal }: { seal: SealMessage | undefined }) {
 
 function Cell({ label, value, icon }: { label: string; value: string; icon?: React.ReactNode }) {
   return (
-    <div className="flex min-w-0 items-center gap-1.5">
-      <span className="text-[9.5px] font-semibold tracking-wider text-muted/70 uppercase">{label}</span>
+    <div className="flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap">
+      <span className="shrink-0 text-[9.5px] font-semibold tracking-wider text-muted/70 uppercase">{label}</span>
       {icon}
       <Hash value={value} label={label} className="text-[0.95em] text-text/90" />
     </div>

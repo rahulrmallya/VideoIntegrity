@@ -1,12 +1,14 @@
-import { Fingerprint, Link2, Play, ShieldAlert, ShieldCheck, ShieldOff, Square, Volume2, VolumeX } from 'lucide-react'
+import { Fingerprint, Link2, Play, Presentation, ShieldAlert, ShieldCheck, ShieldOff, Square, Volume2, VolumeX } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { SourceKind } from '../../api/types'
 import { copyText } from '../../lib/format'
 import { loadSoundPref, playAlarm, saveSoundPref, unlockAudio } from '../../lib/sound'
 import { useConnection, useDevice, useIntegrity, useLive, useSession, useStats } from '../../store/useLive'
 import { SOURCES, useSessionControl } from './useSessionControl'
+import { useUi, type View } from '../../store/useUi'
 
 function Logo() {
+  const presenter = useUi((s) => s.presenter)
   return (
     <div className="flex items-center gap-3">
       <div className="relative flex size-9 items-center justify-center rounded-xl border border-border bg-raised">
@@ -17,7 +19,7 @@ function Logo() {
       </div>
       <div className="leading-tight">
         <div className="text-[17px] font-semibold tracking-tight text-text">FrameSeal</div>
-        <div className="text-[11px] text-muted">Every frame sealed. Every edit caught.</div>
+        {!presenter && <div className="text-[11px] text-muted">Every frame sealed. Every edit caught.</div>}
       </div>
     </div>
   )
@@ -25,6 +27,7 @@ function Logo() {
 
 function SessionPill() {
   const session = useSession()
+  const presenter = useUi((s) => s.presenter)
   const fps = useStats()?.fps_actual ?? 0
   if (session?.status === 'running') {
     return (
@@ -35,7 +38,7 @@ function SessionPill() {
         <span className="font-mono tabular-nums text-text">{fps.toFixed(1)}</span>
         <span className="text-muted">fps</span>
         <span className="text-border">·</span>
-        <span className="max-w-40 truncate text-muted" title={session.source_label ?? ''}>
+        <span className={`max-w-40 truncate text-muted ${presenter ? 'hidden' : ''}`} title={session.source_label ?? ''}>
           {session.source_label ?? session.source}
         </span>
       </div>
@@ -124,6 +127,7 @@ function ConnectionDot() {
 
 function IntegrityPill() {
   const integrity = useIntegrity()
+  const big = useUi((s) => s.presenter && s.view === 'live')
   const styles = {
     SECURE: 'border-sealed/50 bg-sealed/10 text-sealed animate-breathe',
     COMPROMISED: 'border-tampered bg-tampered/15 text-tampered animate-alarm',
@@ -131,9 +135,12 @@ function IntegrityPill() {
   }[integrity]
   const Icon = integrity === 'SECURE' ? ShieldCheck : integrity === 'COMPROMISED' ? ShieldAlert : ShieldOff
   return (
-    <div className={`flex items-center gap-2 rounded-lg border px-4 py-1.5 ${styles}`} title="Stream integrity">
-      <Icon className="size-4.5" strokeWidth={2.4} />
-      <span className="text-[13px] font-bold tracking-[0.18em]">{integrity}</span>
+    <div
+      className={`flex items-center rounded-lg border ${big ? 'gap-2.5 px-6 py-2' : 'gap-2 px-4 py-1.5'} ${styles}`}
+      title="Stream integrity"
+    >
+      <Icon className={big ? 'size-6' : 'size-4.5'} strokeWidth={2.4} />
+      <span className={`font-bold ${big ? 'text-[19px] tracking-[0.2em]' : 'text-[13px] tracking-[0.18em]'}`}>{integrity}</span>
     </div>
   )
 }
@@ -186,15 +193,107 @@ function SessionControls() {
   )
 }
 
+function PresenterChip() {
+  const presenter = useUi((s) => s.presenter)
+  const toggle = useUi((s) => s.togglePresenter)
+  const openHelp = useUi((s) => s.setShortcuts)
+  return (
+    <div className="flex items-center gap-1">
+      <button
+        type="button"
+        onClick={toggle}
+        title="Presenter mode (P)"
+        className={`flex h-8 items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-semibold tracking-wider ${
+          presenter ? 'border-pending/60 bg-pending/10 text-pending' : 'border-border bg-raised text-muted hover:text-text'
+        }`}
+      >
+        <Presentation className="size-3.5" /> {presenter ? 'PRESENTER' : 'P'}
+      </button>
+      <button
+        type="button"
+        onClick={() => openHelp(true)}
+        title="Keyboard shortcuts (?)"
+        className="flex size-8 items-center justify-center rounded-full border border-border bg-raised font-mono text-[13px] text-muted hover:text-text"
+      >
+        ?
+      </button>
+    </div>
+  )
+}
+
+const NAV: { view: View; label: string; key: string }[] = [
+  { view: 'live', label: 'Live', key: 'L' },
+  { view: 'evidence', label: 'Evidence', key: 'E' },
+  { view: 'how', label: 'How it works', key: 'H' },
+]
+
+function NavTabs() {
+  const view = useUi((s) => s.view)
+  const navigate = useUi((s) => s.navigate)
+  const current = view === 'report' ? 'evidence' : view
+  return (
+    <nav className="flex items-center gap-0.5 rounded-lg border border-border bg-raised/60 p-0.5" aria-label="Main">
+      {NAV.map((n) => (
+        <button
+          key={n.view}
+          type="button"
+          onClick={() => navigate(n.view)}
+          title={`${n.label} (${n.key})`}
+          className={`flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12.5px] font-medium whitespace-nowrap transition-colors ${
+            current === n.view ? 'bg-surface text-text shadow-sm ring-1 ring-border' : 'text-muted hover:text-text'
+          }`}
+        >
+          {n.label}
+          <kbd className="font-mono text-[9.5px] text-muted/60">{n.key}</kbd>
+        </button>
+      ))}
+    </nav>
+  )
+}
+
+/** L / E / H switch views (ignored while typing or with modifier keys). */
+/** Global keys: L / E / H views, P presenter mode, ? shortcuts, Esc closes the shortcuts overlay. */
+export function useNavKeys() {
+  const navigate = useUi((s) => s.navigate)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return
+      const el = e.target as HTMLElement | null
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return
+      const ui = useUi.getState()
+      if (e.key === '?') {
+        ui.setShortcuts(!ui.shortcutsOpen)
+        return
+      }
+      if (e.key === 'Escape' && ui.shortcutsOpen) {
+        ui.setShortcuts(false)
+        return
+      }
+      if (e.key.toUpperCase() === 'P') {
+        ui.togglePresenter()
+        return
+      }
+      const hit = NAV.find((n) => n.key === e.key.toUpperCase())
+      if (hit) navigate(hit.view)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [navigate])
+}
+
 export function TopBar() {
   return (
-    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-surface/60 px-4">
+    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-surface/60 px-4 print:hidden">
       <Logo />
-      <div className="ml-4 flex items-center gap-2">
+      <NavTabs />
+      <div className="flex min-w-0 items-center gap-2">
         <SessionPill />
-        <DeviceChip />
+        <div className="hidden 2xl:block">
+          <DeviceChip />
+        </div>
       </div>
       <div className="ml-auto flex items-center gap-2">
+        <PresenterChip />
         <SoundToggle />
         <ConnectionDot />
         <IntegrityPill />

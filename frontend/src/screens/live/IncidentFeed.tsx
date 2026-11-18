@@ -4,17 +4,29 @@ import { detectedText, KIND_ICON, seqRange, timeAgo, useNow } from '../../lib/in
 import { useIncidents, useSession } from '../../store/useLive'
 import { useUi } from '../../store/useUi'
 
-function Row({ inc, now, watchdogS }: { inc: Incident; now: number; watchdogS: number }) {
-  const openDrawer = useUi((s) => s.openDrawer)
+export function IncidentRow({
+  inc,
+  now,
+  watchdogS,
+  onOpen,
+  offline = false,
+}: {
+  inc: Incident
+  now: number
+  watchdogS: number
+  onOpen: () => void
+  /** Incident found in a verification report (no live state, no ack). */
+  offline?: boolean
+}) {
   const Icon = KIND_ICON[inc.kind]
   const open = inc.status === 'open'
   const critical = inc.severity === 'critical'
-  const glow = critical && !inc.acknowledged
+  const glow = critical && !inc.acknowledged && !offline
   const accent = critical ? 'bg-tampered' : 'bg-unverified'
   return (
     <button
       type="button"
-      onClick={() => openDrawer(inc.id)}
+      onClick={onOpen}
       className={`flex w-full items-stretch overflow-hidden rounded-lg border text-left transition-colors hover:bg-raised ${
         glow ? 'animate-glow-red border-tampered/50 bg-tampered/[0.06]' : 'border-border bg-raised/50'
       }`}
@@ -33,12 +45,14 @@ function Row({ inc, now, watchdogS }: { inc: Incident; now: number; watchdogS: n
                 critical ? 'bg-tampered/10 text-tampered' : 'bg-unverified/10 text-unverified'
               }`}
             >
-              {detectedText(inc, watchdogS)}
+              {offline ? `${inc.affected_count} frame${inc.affected_count === 1 ? '' : 's'} · ${inc.kind}` : detectedText(inc, watchdogS)}
             </span>
           </span>
         </span>
         <span className="flex shrink-0 flex-col items-end gap-0.5">
-          {open ? (
+          {offline ? (
+            <span className="text-[10px] font-semibold tracking-wider text-tampered">IN PACKAGE</span>
+          ) : open ? (
             <span className="flex items-center gap-1 text-[10px] font-bold tracking-wider text-tampered">
               <span className="size-1.5 animate-blink rounded-full bg-tampered" /> OPEN
             </span>
@@ -47,7 +61,7 @@ function Row({ inc, now, watchdogS }: { inc: Incident; now: number; watchdogS: n
               <CheckCircle2 className="size-3" /> CLOSED
             </span>
           )}
-          <span className="text-[10px] text-muted/70">{timeAgo(inc.opened_at, now)}</span>
+          {!offline && <span className="text-[10px] text-muted/70">{timeAgo(inc.opened_at, now)}</span>}
         </span>
       </span>
     </button>
@@ -56,6 +70,7 @@ function Row({ inc, now, watchdogS }: { inc: Incident; now: number; watchdogS: n
 
 export function IncidentFeed({ collapsed }: { collapsed: boolean }) {
   const incidents = useIncidents()
+  const openDrawer = useUi((s) => s.openDrawer)
   const session = useSession()
   const now = useNow(1000)
   const watchdogS = session ? (2 * session.checkpoint_interval) / session.fps : 2
@@ -78,7 +93,9 @@ export function IncidentFeed({ collapsed }: { collapsed: boolean }) {
               <ShieldCheck className="size-4 text-sealed" /> No incidents — every frame verified.
             </div>
           ) : (
-            incidents.map((inc) => <Row key={inc.id} inc={inc} now={now} watchdogS={watchdogS} />)
+            incidents.map((inc) => (
+              <IncidentRow key={inc.id} inc={inc} now={now} watchdogS={watchdogS} onOpen={() => openDrawer(inc.id)} />
+            ))
           )}
         </div>
       )}

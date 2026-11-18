@@ -199,9 +199,12 @@ function chainCaption(inc: Incident, ckpt: number | null): string {
   }
 }
 
-function MiniChain({ inc }: { inc: Incident }) {
-  const { timeline } = useTimeline()
-  const checkpoints = useCheckpoints()
+function MiniChain({ inc, offline }: { inc: Incident; offline: boolean }) {
+  const live = useTimeline()
+  const liveCheckpoints = useCheckpoints()
+  // A verification-report incident has nothing to do with the live timeline: use only its own data.
+  const timeline = offline ? EMPTY_TIMELINE : live.timeline
+  const checkpoints = offline ? EMPTY_CHECKPOINTS : liveCheckpoints
   const span = inc.seq_to - inc.seq_from + 1
   const pad = Math.max(2, Math.ceil((8 - Math.min(span, 4)) / 2))
   const seqs: number[] = []
@@ -218,7 +221,8 @@ function MiniChain({ inc }: { inc: Incident }) {
   // The live timeline only covers the last 900 seqs of this page load (e.g. not after a reload):
   // fall back to what the incident itself says about its range.
   const inferred = (seq: number): TimelineStatus | 'unknown' => {
-    if (seq < inc.seq_from || seq > inc.seq_to || inc.kind === 'REPLAY_DETECTED') return 'unknown'
+    if (seq < inc.seq_from || seq > inc.seq_to) return offline ? 'sealed' : 'unknown'
+    if (inc.kind === 'REPLAY_DETECTED') return 'unknown'
     return inc.kind === 'FRAME_DELETED' || inc.kind === 'STREAM_INTERRUPTED' ? 'missing' : 'tampered'
   }
   const statusOf = (seq: number): TimelineStatus | 'unknown' => timeline.get(seq) ?? inferred(seq)
@@ -299,7 +303,10 @@ function MiniChain({ inc }: { inc: Incident }) {
 
 // --- drawer --------------------------------------------------------------------------------------
 
-function DrawerBody({ inc, onClose }: { inc: Incident; onClose: () => void }) {
+const EMPTY_TIMELINE = new Map<number, TimelineStatus>()
+const EMPTY_CHECKPOINTS = new Map<number, boolean>()
+
+function DrawerBody({ inc, onClose, offline }: { inc: Incident; onClose: () => void; offline: boolean }) {
   const catalog = useCatalog()
   const session = useSession()
   const goEvidence = useUi((s) => s.goEvidence)
@@ -341,7 +348,7 @@ function DrawerBody({ inc, onClose }: { inc: Incident; onClose: () => void }) {
                   inc.status === 'open' ? 'bg-tampered/15 text-tampered' : 'bg-sealed/10 text-sealed'
                 }`}
               >
-                {inc.status === 'open' ? 'OPEN' : 'CLOSED · stream re-sealed'}
+                {offline ? 'FOUND IN PACKAGE' : inc.status === 'open' ? 'OPEN' : 'CLOSED · stream re-sealed'}
               </span>
               <span className="font-mono text-muted">{seqRange(inc)}</span>
               <span className="text-muted">
@@ -376,45 +383,54 @@ function DrawerBody({ inc, onClose }: { inc: Incident; onClose: () => void }) {
 
         <HashComparison inc={inc} />
 
-        {inc.kind === 'FRAME_MODIFIED' ? <ModifiedView inc={inc} /> : <MiniChain inc={inc} />}
+        {inc.kind === 'FRAME_MODIFIED' ? <ModifiedView inc={inc} /> : <MiniChain inc={inc} offline={offline} />}
       </div>
 
       <footer className="flex shrink-0 items-center gap-4 border-t border-border bg-surface px-6 py-3.5">
-        <div className="min-w-0 flex-1 space-y-0.5 text-[12px]">
-          <div className="flex items-center gap-1.5 text-text">
-            <Timer className="size-3.5 text-unverified" />
-            {detectedText(inc, watchdogS)}
-            {inc.detection_latency_ms !== null && (inc.kind === 'CHAIN_FORGED' || inc.kind === 'STREAM_INTERRUPTED') && (
-              <span className="font-mono text-muted">· {fmtLatency(inc.detection_latency_ms)}</span>
-            )}
+        {offline ? (
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] text-muted">
+            <ScanSearch className="size-3.5 shrink-0 text-pending" />
+            Found by offline verification of the evidence package. Live extras (latency, attack, received image) are not part of a package.
           </div>
-          <div className="flex items-center gap-1.5 truncate text-muted">
-            <Swords className="size-3.5 shrink-0" />
-            {inc.attack_id ? (
-              <span className="truncate">
-                Caused by <span className="font-mono text-text">{inc.attack_id}</span> · {attack?.label ?? inc.attack_type}
-              </span>
-            ) : (
-              'Not linked to a console attack'
-            )}
-          </div>
-        </div>
-        <button
-          type="button"
-          disabled={inc.acknowledged || acking}
-          onClick={ack}
-          className="flex h-9 items-center gap-1.5 rounded-lg border border-border bg-raised px-3.5 text-[13px] font-medium text-text hover:border-sealed/60 disabled:cursor-default disabled:opacity-60"
-        >
-          <Check className="size-4" />
-          {inc.acknowledged ? 'Acknowledged' : acking ? 'Acknowledging…' : 'Acknowledge'}
-        </button>
-        <button
-          type="button"
-          onClick={() => goEvidence(inc.id)}
-          className="flex h-9 items-center gap-1.5 rounded-lg bg-pending px-3.5 text-[13px] font-semibold text-bg hover:bg-pending/90"
-        >
-          <FileArchive className="size-4" /> Export evidence
-        </button>
+        ) : (
+          <>
+            <div className="min-w-0 flex-1 space-y-0.5 text-[12px]">
+              <div className="flex items-center gap-1.5 text-text">
+                <Timer className="size-3.5 text-unverified" />
+                {detectedText(inc, watchdogS)}
+                {inc.detection_latency_ms !== null && (inc.kind === 'CHAIN_FORGED' || inc.kind === 'STREAM_INTERRUPTED') && (
+                  <span className="font-mono text-muted">· {fmtLatency(inc.detection_latency_ms)}</span>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5 truncate text-muted">
+                <Swords className="size-3.5 shrink-0" />
+                {inc.attack_id ? (
+                  <span className="truncate">
+                    Caused by <span className="font-mono text-text">{inc.attack_id}</span> · {attack?.label ?? inc.attack_type}
+                  </span>
+                ) : (
+                  'Not linked to a console attack'
+                )}
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={inc.acknowledged || acking}
+              onClick={ack}
+              className="flex h-9 items-center gap-1.5 rounded-lg border border-border bg-raised px-3.5 text-[13px] font-medium text-text hover:border-sealed/60 disabled:cursor-default disabled:opacity-60"
+            >
+              <Check className="size-4" />
+              {inc.acknowledged ? 'Acknowledged' : acking ? 'Acknowledging…' : 'Acknowledge'}
+            </button>
+            <button
+              type="button"
+              onClick={() => goEvidence(inc.id)}
+              className="flex h-9 items-center gap-1.5 rounded-lg bg-pending px-3.5 text-[13px] font-semibold text-bg hover:bg-pending/90"
+            >
+              <FileArchive className="size-4" /> Export evidence
+            </button>
+          </>
+        )}
       </footer>
     </>
   )
@@ -422,17 +438,20 @@ function DrawerBody({ inc, onClose }: { inc: Incident; onClose: () => void }) {
 
 export function IncidentDrawer() {
   const drawerId = useUi((s) => s.drawerId)
+  const reportIncident = useUi((s) => s.drawerIncident)
   const close = useUi((s) => s.closeDrawer)
-  const inc = useIncident(drawerId)
+  const liveIncident = useIncident(drawerId)
+  const inc = liveIncident ?? reportIncident
+  const offline = liveIncident === null && reportIncident !== null
 
   useEffect(() => {
-    if (!drawerId) return
+    if (!inc) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') close()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [drawerId, close])
+  }, [inc, close])
 
   return (
     <AnimatePresence>
@@ -444,7 +463,7 @@ export function IncidentDrawer() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={close}
-            className="fixed inset-0 z-40 bg-bg/60 backdrop-blur-[2px]"
+            className="fixed inset-0 z-40 bg-bg/60 backdrop-blur-[2px] print:hidden"
           />
           <motion.aside
             key="drawer"
@@ -456,7 +475,7 @@ export function IncidentDrawer() {
             transition={{ type: 'spring', stiffness: 380, damping: 38 }}
             className="fixed top-0 right-0 z-50 flex h-full w-[min(640px,50vw)] min-w-[520px] flex-col border-l border-border bg-surface shadow-2xl shadow-black/70"
           >
-            <DrawerBody inc={inc} onClose={close} />
+            <DrawerBody inc={inc} onClose={close} offline={offline} />
           </motion.aside>
         </>
       )}

@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef } from 'react'
 import type { TimelineStatus } from '../../api/types'
 import { STATUS_COLOR } from '../../lib/format'
-import { useLive, useTimeline } from '../../store/useLive'
+import { useLatestSeal, useLive, useTimeline } from '../../store/useLive'
+import { motion } from 'motion/react'
+import { Check, X } from 'lucide-react'
 
 const N = 450 // 30 s at 15 fps
 const DIAMOND_ROW = 11
@@ -92,6 +94,26 @@ function draw(canvas: HTMLCanvasElement) {
   }
 }
 
+/** A small tick that pops at the "now" end of the timeline each time a checkpoint seals. */
+function SealTick() {
+  const seal = useLatestSeal()
+  if (!seal) return null
+  return (
+    <motion.span
+      key={`${seal.seq}-${seal.chain_hash}`}
+      initial={{ opacity: 0, scale: 0.4, y: 6 }}
+      animate={{ opacity: [0, 1, 1, 0], scale: [0.4, 1.15, 1, 1], y: [6, -4, -8, -14] }}
+      transition={{ duration: 1.1, times: [0, 0.2, 0.6, 1] }}
+      className={`pointer-events-none absolute -top-3 -right-1 flex size-5 items-center justify-center rounded-full shadow-lg ${
+        seal.valid ? 'bg-sealed text-bg shadow-sealed/40' : 'bg-tampered text-white shadow-tampered/50'
+      }`}
+      title={`checkpoint #${seal.seq} ${seal.valid ? 'sealed' : 'INVALID'}`}
+    >
+      {seal.valid ? <Check className="size-3.5" strokeWidth={3.5} /> : <X className="size-3.5" strokeWidth={3.5} />}
+    </motion.span>
+  )
+}
+
 function useLegendCounts(): Record<TimelineStatus, number> {
   const { timeline, head } = useTimeline()
   return useMemo(() => {
@@ -161,7 +183,10 @@ export function IntegrityTimeline() {
           ))}
         </ul>
       </div>
-      <canvas ref={canvasRef} className="block h-[40px] w-full" />
+      <div className="relative">
+        <canvas ref={canvasRef} className="block h-[40px] w-full" />
+        <SealTick />
+      </div>
       <div className="mt-0.5 flex justify-between font-mono text-[10px] text-muted/70">
         <span>−30 s</span>
         <span>−15 s</span>

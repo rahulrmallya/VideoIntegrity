@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { useSession } from '../../store/useLive'
+import { useUi } from '../../store/useUi'
 import { AttackConsole } from './AttackConsole'
 import { OfflineBanner, StartCard } from './EmptyStates'
 import { HashChain } from './HashChain'
-import { IncidentDrawer } from './IncidentDrawer'
 import { IncidentFeed } from './IncidentFeed'
 import { IntegrityTimeline } from './IntegrityTimeline'
 import { MetricTiles } from './MetricTiles'
@@ -21,12 +21,17 @@ const loadCollapsed = () => {
 }
 
 const COLUMNS = 'grid-cols-[minmax(0,65fr)_minmax(0,35fr)]'
+/** Presenter mode: the video gets more room; the console stays armed (keys 1–7) but folds to its header. */
+const COLUMNS_PRESENTER = 'grid-cols-[minmax(0,71fr)_minmax(0,29fr)]'
 
 /** The Live Monitor — one screen, no page scroll at 1366×768 and 1920×1080. */
 export function LiveMonitor() {
   const session = useSession()
   const noSession = !session || session.status === 'idle'
-  const [collapsed, setCollapsed] = useState(loadCollapsed)
+  const [userCollapsed, setCollapsed] = useState(loadCollapsed)
+  const presenter = useUi((s) => s.presenter)
+  const collapsed = userCollapsed || presenter
+  const cols = presenter ? COLUMNS_PRESENTER : COLUMNS
   useLiveToasts()
 
   const toggle = () => {
@@ -49,7 +54,7 @@ export function LiveMonitor() {
           <StartCard />
         </main>
       ) : (
-        <main className={`grid min-h-0 flex-1 ${COLUMNS} gap-4 px-4 pt-4`}>
+        <main className={`grid min-h-0 flex-1 ${cols} gap-4 px-4 pt-4`}>
           <div className="flex min-h-0 flex-col gap-4">
             <VideoStage />
             <IntegrityTimeline />
@@ -60,11 +65,10 @@ export function LiveMonitor() {
           </div>
         </main>
       )}
-      <div className={`grid shrink-0 ${COLUMNS} gap-4 p-4 ${collapsed ? '' : 'h-[clamp(176px,24vh,224px)]'}`}>
+      <div className={`grid shrink-0 ${cols} gap-4 p-4 ${collapsed ? '' : 'h-[clamp(176px,24vh,224px)]'}`}>
         <AttackConsole collapsed={collapsed} onToggle={toggle} />
         <IncidentFeed collapsed={collapsed} />
       </div>
-      <IncidentDrawer />
     </div>
   )
 }
